@@ -2,5 +2,11 @@
   "rewrites": [
     { "source": "/webhook", "destination": "/api/webhook" },
     { "source": "/", "destination": "/api/webhook" }
+  ],
+  "crons": [
+    {
+      "path": "/api/webhook?cron=scan",
+      "schedule": "*/2 * * * *"
+    }
   ]
 }
