@@ -371,9 +371,9 @@ function getFuturesUrl(exchange, symbol) {
 function getFilters(chatId) {
   if (!userFilters[chatId]) {
     userFilters[chatId] = {
-      minSpread: 1.5,
+      minSpread: 0.5,      // Show spreads from 0.5%
       maxSpread: 100,
-      minVolume: 500000,
+      minVolume: 0,        // No volume filter by default
       enabledExchanges: ['MEXC', 'Gate.io', 'BingX', 'HTX', 'KuCoin'],
       dexEnabled: true
     };
@@ -388,8 +388,8 @@ function filterOpportunities(opportunities, filters) {
       return false;
     }
     
-    // Volume check
-    if (opp.volume24h < filters.minVolume) {
+    // Volume check - only filter if minVolume > 0 AND we have volume data
+    if (filters.minVolume > 0 && opp.volume24h > 0 && opp.volume24h < filters.minVolume) {
       return false;
     }
     
@@ -428,9 +428,9 @@ async function sendAlerts(opportunities) {
     
     // Format message
     const spreadEmoji = opp.spreadPercent >= 5 ? '🔥' : opp.spreadPercent >= 3 ? '⚡' : '📊';
-    const volStr = opp.volume24h >= 1000000 
-      ? `$${(opp.volume24h/1000000).toFixed(2)}M` 
-      : `$${(opp.volume24h/1000).toFixed(0)}K`;
+    const volStr = opp.volume24h > 0 
+      ? (opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(2)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`)
+      : 'н/д';
     
     const message = `
 ${spreadEmoji} <b>АРБИТРАЖНЫЙ СПРЕД!</b>
@@ -453,7 +453,7 @@ ${spreadEmoji} <b>АРБИТРАЖНЫЙ СПРЕД!</b>
       
       // Apply user filters
       if (opp.spreadPercent < filters.minSpread) continue;
-      if (opp.volume24h < filters.minVolume) continue;
+      if (filters.minVolume > 0 && opp.volume24h > 0 && opp.volume24h < filters.minVolume) continue;
       if (!filters.enabledExchanges.includes(opp.spotExchange)) continue;
       
       try {
@@ -487,7 +487,7 @@ const mainKeyboard = {
 const getFiltersKb = (f) => ({
   inline_keyboard: [
     [{ text: `📉 Мин. спред: ${f.minSpread}%`, callback_data: 'filter_min_spread' }],
-    [{ text: `📊 Мин. объём: $${(f.minVolume/1000).toFixed(0)}K`, callback_data: 'filter_min_volume' }],
+    [{ text: `📊 Мин. объём: ${f.minVolume > 0 ? '$' + (f.minVolume/1000).toFixed(0) + 'K' : 'Нет'}`, callback_data: 'filter_min_volume' }],
     [{ text: `${f.dexEnabled ? '✅' : '❌'} DEX Алерты`, callback_data: 'toggle_dex' }],
     [{ text: '💱 Биржи', callback_data: 'filter_exchanges' }],
     [{ text: '🔙 Назад', callback_data: 'back' }]
@@ -558,7 +558,7 @@ async function handleMessage(msg) {
       `📊 Найдено возможностей: ${priceCache.opportunities.length}\n\n` +
       `⚙️ <b>Ваши фильтры:</b>\n` +
       `📉 Спред: ${f.minSpread}%+\n` +
-      `📊 Мин. объём: $${(f.minVolume/1000).toFixed(0)}K\n` +
+      `📊 Мин. объём: ${f.minVolume > 0 ? '$' + (f.minVolume/1000).toFixed(0) + 'K' : 'Нет'}\n` +
       `💱 Биржи: ${f.enabledExchanges.join(', ')}`,
       mainKeyboard
     );
@@ -604,15 +604,15 @@ async function handleScan(chatId) {
   }
   
   let text = `📊 <b>Результаты сканирования</b>\n\n`;
-  text += `🔍 Фильтры: спред ≥${f.minSpread}%, объём ≥$${(f.minVolume/1000).toFixed(0)}K\n\n`;
+  text += `🔍 Фильтры: спред ≥${f.minSpread}%, объём ${f.minVolume > 0 ? '≥$' + (f.minVolume/1000).toFixed(0) + 'K' : 'нет'}\n\n`;
   text += `Найдено: ${opportunities.length} | После фильтрации: ${filtered.length}\n\n`;
   
   for (let i = 0; i < Math.min(10, filtered.length); i++) {
     const opp = filtered[i];
     const emoji = opp.spreadPercent >= 5 ? '🔥' : '⚡';
-    const volStr = opp.volume24h >= 1000000 
-      ? `$${(opp.volume24h/1000000).toFixed(1)}M` 
-      : `$${(opp.volume24h/1000).toFixed(0)}K`;
+    const volStr = opp.volume24h > 0 
+      ? (opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`)
+      : 'н/д';
     
     text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(2)}% (${volStr})\n`;
     text += `   ${opp.spotExchange} → ${opp.futuresExchange}\n\n`;
