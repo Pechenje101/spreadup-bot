@@ -81,6 +81,7 @@ async function fetchMEXCPrices() {
       }
     }
     
+    console.log(`MEXC: ${Object.keys(spot).length} spot, ${Object.keys(futures).length} futures`);
     return { spot, futures, volumes, exchange: 'MEXC' };
   } catch (e) {
     console.error('MEXC error:', e.message);
@@ -117,6 +118,7 @@ async function fetchGateIOPrices() {
       }
     }
     
+    console.log(`Gate.io: ${Object.keys(spot).length} spot, ${Object.keys(futures).length} futures`);
     return { spot, futures, volumes, exchange: 'Gate.io' };
   } catch (e) {
     console.error('Gate.io error:', e.message);
@@ -126,8 +128,10 @@ async function fetchGateIOPrices() {
 
 async function fetchBingXPrices() {
   try {
-    // Spot prices
-    const spotRes = await fetch('https://open-api.bingx.com/openApi/spot/v1/ticker/24hr');
+    const timestamp = Date.now();
+    
+    // Spot prices - requires timestamp
+    const spotRes = await fetch(`https://open-api.bingx.com/openApi/spot/v1/ticker/24hr?timestamp=${timestamp}`);
     const spotData = await spotRes.json();
     
     const spot = {};
@@ -143,20 +147,23 @@ async function fetchBingXPrices() {
       }
     }
     
-    // Futures prices
-    const futuresRes = await fetch('https://open-api.bingx.com/openApi/swap/v2/quote/contracts');
+    // Futures prices - use ticker endpoint
+    const futuresRes = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/ticker?timestamp=${timestamp}`);
     const futuresData = await futuresRes.json();
     
     const futures = {};
-    if (futuresData.data) {
+    if (futuresData.data && Array.isArray(futuresData.data)) {
       for (const item of futuresData.data) {
-        if (item.symbol.endsWith('-USDT')) {
+        if (item.symbol && item.symbol.endsWith('-USDT')) {
           const symbol = item.symbol.replace('-', '');
-          futures[symbol] = parseFloat(item.lastPrice);
+          if (parseFloat(item.lastPrice) > 0) {
+            futures[symbol] = parseFloat(item.lastPrice);
+          }
         }
       }
     }
     
+    console.log(`BingX: ${Object.keys(spot).length} spot, ${Object.keys(futures).length} futures`);
     return { spot, futures, volumes, exchange: 'BingX' };
   } catch (e) {
     console.error('BingX error:', e.message);
@@ -183,37 +190,9 @@ async function fetchHTXPrices() {
       }
     }
     
-    // Futures prices - HTX swap
-    const futuresRes = await fetch('https://api.huobi.pro/linear-swap-api/v1/swap_contract_info');
-    const futuresData = await futuresRes.json();
-    
-    const futures = {};
-    if (futuresData.data) {
-      for (const item of futuresData.data) {
-        if (item.contract_code.endsWith('-USDT')) {
-          const symbol = item.contract_code.replace('-USDT', '') + 'USDT';
-          // Need to fetch price separately
-        }
-      }
-    }
-    
-    // Fetch futures tickers
-    try {
-      const futTickersRes = await fetch('https://api.huobi.pro/linear-swap-ex/market/tickers');
-      const futTickersData = await futTickersRes.json();
-      if (futTickersData.data && futTickersData.data.tickers) {
-        for (const item of futTickersData.data.tickers) {
-          if (item.contract_code.endsWith('-USDT')) {
-            const symbol = item.contract_code.replace('-USDT', '') + 'USDT';
-            futures[symbol] = parseFloat(item.close);
-          }
-        }
-      }
-    } catch (e) {
-      console.error('HTX futures tickers error:', e.message);
-    }
-    
-    return { spot, futures, volumes, exchange: 'HTX' };
+    // HTX futures API is blocked/unavailable, skip
+    console.log(`HTX: ${Object.keys(spot).length} spot (futures unavailable)`);
+    return { spot, futures: {}, volumes, exchange: 'HTX' };
   } catch (e) {
     console.error('HTX error:', e.message);
     return { spot: {}, futures: {}, volumes: {}, exchange: 'HTX' };
@@ -239,36 +218,10 @@ async function fetchKuCoinPrices() {
       }
     }
     
-    // Futures prices
-    try {
-      const futuresRes = await fetch('https://api-futures.kucoin.com/api/v1/contracts/active');
-      const futuresData = await futuresRes.json();
-      
-      const futuresSymbols = {};
-      if (futuresData.data) {
-        for (const item of futuresData.data) {
-          if (item.quoteCurrency === 'USDT') {
-            futuresSymbols[item.symbol] = item.symbolCode;
-          }
-        }
-      }
-      
-      // Get futures tickers
-      const futTickersRes = await fetch('https://api-futures.kucoin.com/api/v1/all-ticker');
-      const futTickersData = await futTickersRes.json();
-      
-      if (futTickersData.data) {
-        for (const item of futTickersData.data) {
-          const base = item.symbol.replace('USDT', '');
-          const symbol = base + 'USDT';
-          futures[symbol] = parseFloat(item.last);
-        }
-      }
-    } catch (e) {
-      console.error('KuCoin futures error:', e.message);
-    }
-    
-    return { spot, futures, volumes, exchange: 'KuCoin' };
+    // KuCoin futures uses different symbol format (XBT = BTC, and suffix M)
+    // We'll skip futures for now as the API is complex
+    console.log(`KuCoin: ${Object.keys(spot).length} spot (futures uses different symbol format)`);
+    return { spot, futures: {}, volumes, exchange: 'KuCoin' };
   } catch (e) {
     console.error('KuCoin error:', e.message);
     return { spot: {}, futures: {}, volumes: {}, exchange: 'KuCoin' };
@@ -292,11 +245,15 @@ async function scanAllExchanges() {
   // Combine all data
   const allData = [mexc, gateio, bingx, htx, kucoin];
   
+  // Count opportunities per exchange
+  const exchangeStats = {};
+  
   // Find common symbols across spot and futures
   const opportunities = [];
   
   for (const data of allData) {
     const { spot, futures, volumes, exchange } = data;
+    let count = 0;
     
     for (const symbol in spot) {
       if (futures[symbol]) {
@@ -324,10 +281,12 @@ async function scanAllExchanges() {
               futuresUrl: getFuturesUrl(exchange, symbol),
               timestamp: new Date().toISOString()
             });
+            count++;
           }
         }
       }
     }
+    exchangeStats[exchange] = count;
   }
   
   // Sort by spread descending
@@ -337,7 +296,7 @@ async function scanAllExchanges() {
   priceCache.opportunities = opportunities;
   priceCache.lastUpdate = new Date();
   
-  console.log(`Found ${opportunities.length} opportunities`);
+  console.log(`Found ${opportunities.length} opportunities:`, exchangeStats);
   
   return opportunities;
 }
