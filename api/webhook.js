@@ -287,60 +287,40 @@ async function fetchBitgetPrices() {
 // Jupiter (Solana DEX via Dexscreener)
 async function fetchJupiterPrices() {
   try {
-    // Fetch top Solana pairs from Dexscreener
-    const res = await fetch('https://api.dexscreener.com/latest/dex/search?q=USDC');
-    const data = await res.json();
-    
     const spot = {}, volumes = {};
     
-    if (data.pairs) {
-      // Filter Solana pairs with USDC
-      const solanaPairs = data.pairs.filter(p => 
-        p.chainId === 'solana' && 
-        (p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT')
-      );
-      
-      for (const pair of solanaPairs) {
-        const baseSymbol = pair.baseToken?.symbol;
-        const quoteSymbol = pair.quoteToken?.symbol;
-        
-        if (baseSymbol && quoteSymbol && pair.priceUsd) {
-          // Create symbol like SOLUSDC
-          const symbol = baseSymbol + 'USDT';
-          const price = parseFloat(pair.priceUsd);
-          
-          if (price > 0) {
-            spot[symbol] = price;
-            // Volume in USD
-            const vol = parseFloat(pair.volume?.h24 || 0);
-            volumes[symbol] = Math.max(volumes[symbol] || 0, vol);
-          }
-        }
-      }
-    }
-    
-    // Also fetch specific popular tokens
+    // Popular Solana tokens with correct addresses
     const popularTokens = [
       { symbol: 'SOL', address: 'So11111111111111111111111111111111111111112' },
       { symbol: 'BONK', address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263' },
       { symbol: 'WIF', address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm' },
       { symbol: 'JUP', address: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN' },
-      { symbol: 'PYTH', address: '2rHrJrJUuDqvJwENH2qB8ajrmLLY4VertexBufferObject' }
+      { symbol: 'PYTH', address: '2rHrJrJUuDqvJwENH2qB8ajrmLLY4VertexBufferObject' },
+      { symbol: 'RAY', address: '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R' },
+      { symbol: 'ORCA', address: 'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE' },
+      { symbol: 'RENDER', address: 'rndrizKT3MK1iimdxRmWzYBfFW6E3kVvkdZ1uWkYThq' },
+      { symbol: 'JITO', address: 'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn' },
+      { symbol: 'BOME', address: 'UKMMBLkZqCrwKBJcHUY1GJSBVGSjimXePVvb5HjTRSt' },
+      { symbol: 'POPCAT', address: '7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr' },
+      { symbol: 'MYRO', address: 'HhJpBhRRn4g56VsyLuT8DL5Bv31HkXqsrahEHhMjob6J' },
+      { symbol: 'WEN', address: 'WENWENvqwNcb4TpKyjZ6L1ZfpGAVjvJziFM5T2xN4Tps' },
+      { symbol: 'DOGGO', address: '6Tkr7iUoJ9GX9SeLF6RTefZYr5dLuVQKCC3c9fpJRsWx' }
     ];
     
+    // Fetch each token's price
     for (const token of popularTokens) {
       try {
         const tokenRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${token.address}`);
         const tokenData = await tokenRes.json();
         
         if (tokenData.pairs) {
-          // Find best USDC/USDT pair
+          // Find best USDC/USDT pair on Solana
           const bestPair = tokenData.pairs
             .filter(p => p.chainId === 'solana' && (p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT'))
-            .sort((a, b) => (b.volume?.h24 || 0) - (a.volume?.h24 || 0))[0];
+            .sort((a, b) => (parseFloat(b.volume?.h24 || 0)) - (parseFloat(a.volume?.h24 || 0)))[0];
           
           if (bestPair && bestPair.priceUsd) {
-            const symbol = token.symbol + 'USDT';
+            const symbol = token.symbol.toUpperCase() + 'USDT';
             const price = parseFloat(bestPair.priceUsd);
             if (price > 0) {
               spot[symbol] = price;
@@ -351,6 +331,37 @@ async function fetchJupiterPrices() {
       } catch (e) {
         // Continue if one token fails
       }
+    }
+    
+    // Also fetch from general search for more tokens
+    try {
+      const searchRes = await fetch('https://api.dexscreener.com/latest/dex/search?q=USDC');
+      const searchData = await searchRes.json();
+      
+      if (searchData.pairs) {
+        const solanaPairs = searchData.pairs.filter(p => 
+          p.chainId === 'solana' && 
+          (p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT')
+        );
+        
+        for (const pair of solanaPairs) {
+          let baseSymbol = pair.baseToken?.symbol?.toUpperCase() || '';
+          // Clean up symbol names
+          baseSymbol = baseSymbol.replace('$', '').replace('-', '');
+          
+          if (baseSymbol && pair.priceUsd) {
+            const symbol = baseSymbol + 'USDT';
+            const price = parseFloat(pair.priceUsd);
+            
+            if (price > 0 && !spot[symbol]) { // Don't overwrite popular tokens
+              spot[symbol] = price;
+              volumes[symbol] = Math.max(volumes[symbol] || 0, parseFloat(pair.volume?.h24 || 0));
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Jupiter search error:', e.message);
     }
     
     console.log(`Jupiter: ${Object.keys(spot).length} DEX prices`);
