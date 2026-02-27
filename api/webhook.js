@@ -362,7 +362,10 @@ async function scanAllExchanges() {
         isCrossExchange: bestSpot !== bestFutures,
         volume24h: allVolumes[symbol] || 0,
         spotUrl: getUrl(bestSpot, symbol, 'spot'),
-        futuresUrl: getUrl(bestFutures, symbol, 'futures')
+        futuresUrl: getUrl(bestFutures, symbol, 'futures'),
+        // Store all prices for display
+        allSpotPrices: spotPrices,
+        allFuturesPrices: futuresPrices
       });
     }
   }
@@ -665,7 +668,9 @@ async function showSpotFuturesResults(chatId, opportunities, f) {
   text += `Найдено: ${opportunities.length} | После фильтрации: ${filtered.length}\n`;
   text += `🔗 Межбиржевых: ${crossCount}\n\n`;
   
-  for (let i = 0; i < Math.min(10, filtered.length); i++) {
+  const exchanges = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
+  
+  for (let i = 0; i < Math.min(5, filtered.length); i++) {
     const opp = filtered[i];
     const emoji = opp.spreadPercent >= 5 ? '🔥' : '⚡';
     const crossEmoji = opp.isCrossExchange ? '🔗 ' : '';
@@ -675,6 +680,28 @@ async function showSpotFuturesResults(chatId, opportunities, f) {
     
     text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(2)}% (${volStr})\n`;
     text += `   ${crossEmoji}${opp.spotExchange} → ${opp.futuresExchange}\n\n`;
+    
+    // Show SPOT prices on all exchanges
+    text += `   📉 <b>SPOT цены:</b>\n`;
+    for (const ex of exchanges) {
+      if (opp.allSpotPrices && opp.allSpotPrices[ex]) {
+        const price = opp.allSpotPrices[ex];
+        const isBest = ex === opp.spotExchange;
+        text += `   ${isBest ? '✅' : '   '} ${ex}: $${formatPrice(price)}\n`;
+      }
+    }
+    
+    // Show FUTURES prices on all exchanges
+    text += `\n   📈 <b>FUTURES цены:</b>\n`;
+    for (const ex of exchanges) {
+      if (opp.allFuturesPrices && opp.allFuturesPrices[ex]) {
+        const price = opp.allFuturesPrices[ex];
+        const isBest = ex === opp.futuresExchange;
+        text += `   ${isBest ? '✅' : '   '} ${ex}: $${formatPrice(price)}\n`;
+      }
+    }
+    
+    text += `\n`;
   }
   
   await sendMessage(chatId, text, mainKeyboard);
