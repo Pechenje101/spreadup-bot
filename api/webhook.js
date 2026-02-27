@@ -284,6 +284,83 @@ async function fetchBitgetPrices() {
   }
 }
 
+// Jupiter (Solana DEX via Dexscreener)
+async function fetchJupiterPrices() {
+  try {
+    // Fetch top Solana pairs from Dexscreener
+    const res = await fetch('https://api.dexscreener.com/latest/dex/search?q=USDC');
+    const data = await res.json();
+    
+    const spot = {}, volumes = {};
+    
+    if (data.pairs) {
+      // Filter Solana pairs with USDC
+      const solanaPairs = data.pairs.filter(p => 
+        p.chainId === 'solana' && 
+        (p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT')
+      );
+      
+      for (const pair of solanaPairs) {
+        const baseSymbol = pair.baseToken?.symbol;
+        const quoteSymbol = pair.quoteToken?.symbol;
+        
+        if (baseSymbol && quoteSymbol && pair.priceUsd) {
+          // Create symbol like SOLUSDC
+          const symbol = baseSymbol + 'USDT';
+          const price = parseFloat(pair.priceUsd);
+          
+          if (price > 0) {
+            spot[symbol] = price;
+            // Volume in USD
+            const vol = parseFloat(pair.volume?.h24 || 0);
+            volumes[symbol] = Math.max(volumes[symbol] || 0, vol);
+          }
+        }
+      }
+    }
+    
+    // Also fetch specific popular tokens
+    const popularTokens = [
+      { symbol: 'SOL', address: 'So11111111111111111111111111111111111111112' },
+      { symbol: 'BONK', address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263' },
+      { symbol: 'WIF', address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm' },
+      { symbol: 'JUP', address: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN' },
+      { symbol: 'PYTH', address: '2rHrJrJUuDqvJwENH2qB8ajrmLLY4VertexBufferObject' }
+    ];
+    
+    for (const token of popularTokens) {
+      try {
+        const tokenRes = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${token.address}`);
+        const tokenData = await tokenRes.json();
+        
+        if (tokenData.pairs) {
+          // Find best USDC/USDT pair
+          const bestPair = tokenData.pairs
+            .filter(p => p.chainId === 'solana' && (p.quoteToken?.symbol === 'USDC' || p.quoteToken?.symbol === 'USDT'))
+            .sort((a, b) => (b.volume?.h24 || 0) - (a.volume?.h24 || 0))[0];
+          
+          if (bestPair && bestPair.priceUsd) {
+            const symbol = token.symbol + 'USDT';
+            const price = parseFloat(bestPair.priceUsd);
+            if (price > 0) {
+              spot[symbol] = price;
+              volumes[symbol] = Math.max(volumes[symbol] || 0, parseFloat(bestPair.volume?.h24 || 0));
+            }
+          }
+        }
+      } catch (e) {
+        // Continue if one token fails
+      }
+    }
+    
+    console.log(`Jupiter: ${Object.keys(spot).length} DEX prices`);
+    return { spot, futures: {}, volumes, funding: {}, exchange: 'Jupiter' };
+  } catch (e) {
+    console.error('Jupiter error:', e.message);
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Jupiter' };
+  }
+}
+
 // ========== Scanning ==========
 
 async function scanAllExchanges() {
@@ -295,11 +372,12 @@ async function scanAllExchanges() {
     fetchBingXPrices(),
     fetchBybitPrices(),
     fetchOKXPrices(),
-    fetchBitgetPrices()
+    fetchBitgetPrices(),
+    fetchJupiterPrices()
   ]);
   
   const allSpot = {}, allFutures = {}, allVolumes = {}, allFunding = {};
-  const exchanges = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
+  const exchanges = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'Jupiter'];
   const exchangeStats = {};
   
   for (const { spot, futures, volumes, funding, exchange } of results) {
@@ -461,7 +539,8 @@ function getUrl(exchange, symbol, type) {
       : `https://www.okx.com/trade-swap/${base}-USDT-SWAP`,
     'Bitget': isSpot
       ? `https://www.bitget.com/spot/${symbol}`
-      : `https://www.bitget.com/futures/usdt/${symbol}`
+      : `https://www.bitget.com/futures/usdt/${symbol}`,
+    'Jupiter': `https://jup.ag/swap/${base}-USDC`
   };
   
   return urls[exchange] || '#';
@@ -476,7 +555,7 @@ function getFilters(chatId) {
       minSpread: 0.5,
       minFundingProfit: 0.1,  // Min daily profit % for funding
       minVolume: 0,
-      enabledExchanges: ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget']
+      enabledExchanges: ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'Jupiter']
     };
   }
   return userFilters[chatId];
@@ -520,7 +599,7 @@ const getFiltersKb = (f) => ({
 
 const getExchangesKb = (enabled) => ({
   inline_keyboard: [
-    ...['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'].map(ex => [{
+    ...['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'Jupiter'].map(ex => [{
       text: `${enabled.includes(ex) ? '✅' : '❌'} ${ex}`,
       callback_data: `toggle_exchange_${ex.replace('.', '')}`
     }]),
@@ -573,7 +652,7 @@ async function handleMessage(msg) {
       `📊 <b>Режимы работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спред между спотом и фьючерсом\n` +
       `• 💰 <b>Funding Rate</b> - разница фандинг рейтов между биржами\n\n` +
-      `💱 <b>Биржи:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget\n\n` +
+      `💱 <b>Биржи:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget, Jupiter (DEX)\n\n` +
       `✅ Вы подписаны на уведомления!`,
       mainKeyboard
     );
@@ -625,7 +704,7 @@ async function handleStatus(chatId) {
     `💰 <b>Funding Rate:</b>\n` +
     `   Возможностей: ${priceCache.fundingOpps.length}\n\n` +
     `⚙️ <b>Текущий режим:</b> ${f.mode === 'spot-futures' ? 'Spot-Futures' : 'Funding Rate'}\n` +
-    `💱 Биржи: ${f.enabledExchanges.length}/6`,
+    `💱 Биржи: ${f.enabledExchanges.length}/7`,
     mainKeyboard
   );
 }
@@ -668,7 +747,7 @@ async function showSpotFuturesResults(chatId, opportunities, f) {
   text += `Найдено: ${opportunities.length} | После фильтрации: ${filtered.length}\n`;
   text += `🔗 Межбиржевых: ${crossCount}\n\n`;
   
-  const exchanges = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
+  const exchanges = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'Jupiter'];
   
   for (let i = 0; i < Math.min(5, filtered.length); i++) {
     const opp = filtered[i];
@@ -811,7 +890,7 @@ async function handleCallback(cb) {
     else f.enabledExchanges.push(exchange);
     await sendMessage(chatId, '💱 Биржи обновлены', getExchangesKb(f.enabledExchanges));
   } else if (data === 'enable_all') {
-    f.enabledExchanges = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
+    f.enabledExchanges = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'Jupiter'];
     await sendMessage(chatId, '✅ Все биржи включены', getExchangesKb(f.enabledExchanges));
   } else if (data === 'disable_all') {
     f.enabledExchanges = [];
@@ -931,7 +1010,7 @@ export default async function handler(req, res) {
       status: 'SpreadUP Bot Active',
       version: '4.0.0',
       modes: ['spot-futures', 'funding-rate'],
-      exchanges: ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'],
+      exchanges: ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'Jupiter'],
       spotFuturesOpps: priceCache.opportunities.length,
       fundingOpps: priceCache.fundingOpps.length,
       lastUpdate: priceCache.lastUpdate
