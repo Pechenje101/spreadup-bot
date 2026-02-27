@@ -1,27 +1,33 @@
 /**
- * SpreadUP Bot - Cross-Exchange Arbitrage Scanner
- * Scans MEXC, Gate.io, BingX, Bybit, OKX, Bitget for spot-futures spreads
- * Supports cross-exchange arbitrage (spot on one, futures on another)
+ * SpreadUP Bot v4.0 - Spot-Futures + Funding Rate Arbitrage
+ * 
+ * Two modes:
+ * 1. Spot-Futures: Find price spread between spot and futures
+ * 2. Funding Rate: Find funding rate arbitrage opportunities
+ * 
+ * Exchanges: MEXC, Gate.io, BingX, Bybit, OKX, Bitget
  */
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8476184475:AAEka7mj2waSrH1XV4z-PWwuMFxwTVVsbHg';
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// Global cache for prices
+// Global cache
 let priceCache = {
-  spot: {},      // { "BTCUSDT": { MEXC: 68000, Gate.io: 67950, ... } }
-  futures: {},   // { "BTCUSDT": { MEXC: 68100, Gate.io: 68050, ... } }
-  volumes: {},   // { "BTCUSDT": { MEXC: 1000000, ... } }
+  spot: {},
+  futures: {},
+  volumes: {},
+  fundingRates: {},  // { "BTCUSDT": { MEXC: 0.0001, Bybit: 0.0002, ... } }
   lastUpdate: null,
-  opportunities: []
+  opportunities: [],
+  fundingOpps: []
 };
 
-// In-memory user storage
+// User storage
 const userFilters = {};
 const userSubscribed = {};
 const lastAlertTime = {};
 
-// ========== Telegram API Functions ==========
+// ========== Telegram API ==========
 
 async function telegramApi(method, data) {
   const url = `${TELEGRAM_API}/${method}`;
@@ -43,19 +49,21 @@ async function answerCallback(callbackId) {
   return telegramApi('answerCallbackQuery', { callback_query_id: callbackId });
 }
 
-// ========== Exchange REST API Functions ==========
+// ========== Spot & Futures Prices ==========
 
 async function fetchMEXCPrices() {
   try {
-    const [spotRes, futuresRes] = await Promise.all([
+    const [spotRes, futuresRes, fundingRes] = await Promise.all([
       fetch('https://api.mexc.com/api/v3/ticker/24hr'),
-      fetch('https://contract.mexc.com/api/v1/contract/ticker')
+      fetch('https://contract.mexc.com/api/v1/contract/ticker'),
+      fetch('https://contract.mexc.com/api/v1/contract/funding_rate')
     ]);
     
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
+    const fundingData = await fundingRes.json();
     
-    const spot = {}, futures = {}, volumes = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {};
     
     for (const item of spotData) {
       if (item.symbol.endsWith('USDT')) {
@@ -71,10 +79,17 @@ async function fetchMEXCPrices() {
       }
     }
     
-    return { spot, futures, volumes, exchange: 'MEXC' };
+    if (fundingData.data) {
+      for (const item of fundingData.data) {
+        const symbol = item.symbol.replace('_', '');
+        funding[symbol] = parseFloat(item.fundingRate) || 0;
+      }
+    }
+    
+    return { spot, futures, volumes, funding, exchange: 'MEXC' };
   } catch (e) {
     console.error('MEXC error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, exchange: 'MEXC' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'MEXC' };
   }
 }
 
@@ -88,7 +103,7 @@ async function fetchGateIOPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {};
     
     for (const item of spotData) {
       if (item.currency_pair.endsWith('_USDT')) {
@@ -102,13 +117,14 @@ async function fetchGateIOPrices() {
       if (!item.in_delisting) {
         const symbol = item.name.replace('_', '');
         futures[symbol] = parseFloat(item.last_price);
+        funding[symbol] = parseFloat(item.funding_rate) || 0;
       }
     }
     
-    return { spot, futures, volumes, exchange: 'Gate.io' };
+    return { spot, futures, volumes, funding, exchange: 'Gate.io' };
   } catch (e) {
     console.error('Gate.io error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, exchange: 'Gate.io' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Gate.io' };
   }
 }
 
@@ -123,7 +139,7 @@ async function fetchBingXPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {};
     
     if (spotData.data) {
       for (const item of spotData.data) {
@@ -140,15 +156,18 @@ async function fetchBingXPrices() {
         if (item.symbol && item.symbol.endsWith('-USDT')) {
           const symbol = item.symbol.replace('-', '');
           const price = parseFloat(item.lastPrice);
-          if (price > 0) futures[symbol] = price;
+          if (price > 0) {
+            futures[symbol] = price;
+            funding[symbol] = parseFloat(item.fundingRate) || 0;
+          }
         }
       }
     }
     
-    return { spot, futures, volumes, exchange: 'BingX' };
+    return { spot, futures, volumes, funding, exchange: 'BingX' };
   } catch (e) {
     console.error('BingX error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, exchange: 'BingX' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'BingX' };
   }
 }
 
@@ -162,7 +181,7 @@ async function fetchBybitPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {};
     
     if (spotData.result?.list) {
       for (const item of spotData.result.list) {
@@ -177,14 +196,15 @@ async function fetchBybitPrices() {
       for (const item of futuresData.result.list) {
         if (item.symbol.endsWith('USDT') && !item.symbol.includes('1000000')) {
           futures[item.symbol] = parseFloat(item.lastPrice);
+          funding[item.symbol] = parseFloat(item.fundingRate) || 0;
         }
       }
     }
     
-    return { spot, futures, volumes, exchange: 'Bybit' };
+    return { spot, futures, volumes, funding, exchange: 'Bybit' };
   } catch (e) {
     console.error('Bybit error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, exchange: 'Bybit' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Bybit' };
   }
 }
 
@@ -198,7 +218,7 @@ async function fetchOKXPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {};
     
     if (spotData.data) {
       for (const item of spotData.data) {
@@ -215,14 +235,15 @@ async function fetchOKXPrices() {
         if (item.instId.endsWith('-USDT-SWAP')) {
           const symbol = item.instId.replace('-USDT-SWAP', '') + 'USDT';
           futures[symbol] = parseFloat(item.last);
+          funding[symbol] = parseFloat(item.fundingRate) || 0;
         }
       }
     }
     
-    return { spot, futures, volumes, exchange: 'OKX' };
+    return { spot, futures, volumes, funding, exchange: 'OKX' };
   } catch (e) {
     console.error('OKX error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, exchange: 'OKX' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'OKX' };
   }
 }
 
@@ -236,7 +257,7 @@ async function fetchBitgetPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {};
     
     if (spotData.data) {
       for (const item of spotData.data) {
@@ -251,23 +272,23 @@ async function fetchBitgetPrices() {
       for (const item of futuresData.data) {
         if (item.symbol.endsWith('USDT')) {
           futures[item.symbol] = parseFloat(item.lastPr);
+          funding[item.symbol] = parseFloat(item.fundingRate) || 0;
         }
       }
     }
     
-    return { spot, futures, volumes, exchange: 'Bitget' };
+    return { spot, futures, volumes, funding, exchange: 'Bitget' };
   } catch (e) {
     console.error('Bitget error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, exchange: 'Bitget' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Bitget' };
   }
 }
 
-// ========== Price Aggregation ==========
+// ========== Scanning ==========
 
 async function scanAllExchanges() {
-  console.log('Starting cross-exchange market scan...');
+  console.log('Starting full market scan...');
   
-  // Fetch all exchanges in parallel
   const results = await Promise.all([
     fetchMEXCPrices(),
     fetchGateIOPrices(),
@@ -277,44 +298,39 @@ async function scanAllExchanges() {
     fetchBitgetPrices()
   ]);
   
-  // Aggregate prices by symbol
-  const allSpot = {};      // { "BTCUSDT": { MEXC: 68000, Gate.io: 67950, ... } }
-  const allFutures = {};   // { "BTCUSDT": { MEXC: 68100, Gate.io: 68050, ... } }
-  const allVolumes = {};   // { "BTCUSDT": 1000000 }
-  
+  const allSpot = {}, allFutures = {}, allVolumes = {}, allFunding = {};
+  const exchanges = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
   const exchangeStats = {};
   
-  for (const { spot, futures, volumes, exchange } of results) {
+  for (const { spot, futures, volumes, funding, exchange } of results) {
     exchangeStats[exchange] = {
       spot: Object.keys(spot).length,
       futures: Object.keys(futures).length
     };
     
-    // Aggregate spot
     for (const symbol in spot) {
       if (!allSpot[symbol]) allSpot[symbol] = {};
       allSpot[symbol][exchange] = spot[symbol];
       allVolumes[symbol] = Math.max(allVolumes[symbol] || 0, volumes[symbol] || 0);
     }
     
-    // Aggregate futures
     for (const symbol in futures) {
       if (!allFutures[symbol]) allFutures[symbol] = {};
       allFutures[symbol][exchange] = futures[symbol];
+      
+      if (!allFunding[symbol]) allFunding[symbol] = {};
+      allFunding[symbol][exchange] = funding[symbol] || 0;
     }
   }
   
-  // Find cross-exchange opportunities
-  const opportunities = [];
-  const exchanges = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
+  // === Spot-Futures Opportunities ===
+  const spotFuturesOpps = [];
   
   for (const symbol in allSpot) {
     const spotPrices = allSpot[symbol];
     const futuresPrices = allFutures[symbol];
-    
     if (!futuresPrices) continue;
     
-    // Find best spot (lowest) and best futures (highest)
     let bestSpot = null, bestSpotPrice = Infinity;
     let bestFutures = null, bestFuturesPrice = 0;
     
@@ -331,14 +347,13 @@ async function scanAllExchanges() {
     
     if (!bestSpot || !bestFutures || bestSpotPrice <= 0 || bestFuturesPrice <= 0) continue;
     
-    // Calculate spread
     const spread = ((bestFuturesPrice - bestSpotPrice) / bestSpotPrice) * 100;
     
     if (spread > 0) {
-      const baseAsset = symbol.replace('USDT', '');
-      opportunities.push({
+      spotFuturesOpps.push({
+        type: 'spot-futures',
         symbol,
-        baseAsset,
+        baseAsset: symbol.replace('USDT', ''),
         spotPrice: bestSpotPrice,
         futuresPrice: bestFuturesPrice,
         spreadPercent: spread,
@@ -347,25 +362,78 @@ async function scanAllExchanges() {
         isCrossExchange: bestSpot !== bestFutures,
         volume24h: allVolumes[symbol] || 0,
         spotUrl: getUrl(bestSpot, symbol, 'spot'),
-        futuresUrl: getUrl(bestFutures, symbol, 'futures'),
-        timestamp: new Date().toISOString()
+        futuresUrl: getUrl(bestFutures, symbol, 'futures')
       });
     }
   }
   
-  // Sort by spread descending
-  opportunities.sort((a, b) => b.spreadPercent - a.spreadPercent);
+  spotFuturesOpps.sort((a, b) => b.spreadPercent - a.spreadPercent);
+  
+  // === Funding Rate Opportunities ===
+  const fundingOpps = [];
+  
+  for (const symbol in allFunding) {
+    const rates = allFunding[symbol];
+    const futuresPrices = allFutures[symbol];
+    if (!futuresPrices) continue;
+    
+    let maxRate = -Infinity, maxEx = null;
+    let minRate = Infinity, minEx = null;
+    
+    for (const ex of exchanges) {
+      if (rates[ex] !== undefined && futuresPrices[ex]) {
+        if (rates[ex] > maxRate) {
+          maxRate = rates[ex];
+          maxEx = ex;
+        }
+        if (rates[ex] < minRate) {
+          minRate = rates[ex];
+          minEx = ex;
+        }
+      }
+    }
+    
+    if (maxEx && minEx && maxRate > minRate) {
+      const price = futuresPrices[maxEx] || futuresPrices[minEx] || 0;
+      const rateDiff = maxRate - minRate;
+      
+      // Estimate daily profit (funding is paid every 8h = 3 times per day)
+      const dailyProfitPercent = rateDiff * 3 * 100;
+      
+      if (dailyProfitPercent > 0.01) { // At least 0.01% daily
+        fundingOpps.push({
+          type: 'funding-rate',
+          symbol,
+          baseAsset: symbol.replace('USDT', ''),
+          longExchange: minEx,   // Long where funding is low (you pay less)
+          shortExchange: maxEx,  // Short where funding is high (you receive)
+          longRate: minRate,
+          shortRate: maxRate,
+          rateDiff,
+          dailyProfitPercent,
+          price,
+          volume24h: allVolumes[symbol] || 0,
+          longUrl: getUrl(minEx, symbol, 'futures'),
+          shortUrl: getUrl(maxEx, symbol, 'futures')
+        });
+      }
+    }
+  }
+  
+  fundingOpps.sort((a, b) => b.dailyProfitPercent - a.dailyProfitPercent);
   
   // Update cache
   priceCache.spot = allSpot;
   priceCache.futures = allFutures;
   priceCache.volumes = allVolumes;
-  priceCache.opportunities = opportunities;
+  priceCache.fundingRates = allFunding;
+  priceCache.opportunities = spotFuturesOpps;
+  priceCache.fundingOpps = fundingOpps;
   priceCache.lastUpdate = new Date();
   
-  console.log(`Found ${opportunities.length} opportunities. Exchanges:`, exchangeStats);
+  console.log(`Found ${spotFuturesOpps.length} spot-futures, ${fundingOpps.length} funding opps`);
   
-  return opportunities;
+  return { spotFuturesOpps, fundingOpps };
 }
 
 function getUrl(exchange, symbol, type) {
@@ -401,82 +469,14 @@ function getUrl(exchange, symbol, type) {
 function getFilters(chatId) {
   if (!userFilters[chatId]) {
     userFilters[chatId] = {
+      mode: 'spot-futures',  // 'spot-futures' or 'funding-rate'
       minSpread: 0.5,
-      maxSpread: 100,
+      minFundingProfit: 0.1,  // Min daily profit % for funding
       minVolume: 0,
-      enabledExchanges: ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'],
-      showCrossExchange: true
+      enabledExchanges: ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget']
     };
   }
   return userFilters[chatId];
-}
-
-function filterOpportunities(opportunities, filters) {
-  return opportunities.filter(opp => {
-    if (opp.spreadPercent < filters.minSpread || opp.spreadPercent > filters.maxSpread) return false;
-    if (filters.minVolume > 0 && opp.volume24h > 0 && opp.volume24h < filters.minVolume) return false;
-    if (!filters.enabledExchanges.includes(opp.spotExchange)) return false;
-    if (!filters.enabledExchanges.includes(opp.futuresExchange)) return false;
-    return true;
-  });
-}
-
-// ========== Alert Sending ==========
-
-async function sendAlerts(opportunities) {
-  const subscribers = Object.keys(userSubscribed).filter(id => userSubscribed[id]);
-  if (subscribers.length === 0) return;
-  
-  const now = Date.now();
-  const cooldownMs = 20 * 60 * 1000;
-  
-  for (const opp of opportunities) {
-    const assetKey = opp.baseAsset;
-    if (lastAlertTime[assetKey] && (now - lastAlertTime[assetKey]) < cooldownMs) continue;
-    if (opp.spreadPercent < 2.5) continue;
-    
-    const spreadEmoji = opp.spreadPercent >= 5 ? '🔥' : opp.spreadPercent >= 3 ? '⚡' : '📊';
-    const crossEmoji = opp.isCrossExchange ? '🔗 ' : '';
-    const volStr = opp.volume24h > 0 
-      ? (opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`)
-      : 'н/д';
-    
-    const message = `
-${spreadEmoji} <b>АРБИТРАЖНЫЙ СПРЕД!</b>
-
-${crossEmoji}📊 <b>Актив:</b> ${opp.baseAsset}/USDT
-📈 <b>Спред:</b> ${opp.spreadPercent.toFixed(2)}%
-
-💰 <b>Цены:</b>
-   Спот (${opp.spotExchange}): $${formatPrice(opp.spotPrice)}
-   Фьючерс (${opp.futuresExchange}): $${formatPrice(opp.futuresPrice)}
-
-📊 <b>Объем 24ч:</b> ${volStr}
-${opp.isCrossExchange ? '\n⚠️ <b>Межбиржевой арбитраж!</b>\n' : ''}
-🔗 <a href="${opp.spotUrl}">Спот</a> | <a href="${opp.futuresUrl}">Фьючерс</a>
-`;
-    
-    for (const chatId of subscribers) {
-      const filters = getFilters(chatId);
-      if (opp.spreadPercent < filters.minSpread) continue;
-      if (!filters.enabledExchanges.includes(opp.spotExchange)) continue;
-      if (!filters.enabledExchanges.includes(opp.futuresExchange)) continue;
-      
-      try {
-        await sendMessage(chatId, message);
-      } catch (e) {
-        console.error(`Failed to send to ${chatId}:`, e.message);
-      }
-    }
-    
-    lastAlertTime[assetKey] = now;
-  }
-}
-
-function formatPrice(price) {
-  if (price >= 1000) return price.toFixed(2);
-  if (price >= 1) return price.toFixed(4);
-  return price.toFixed(6);
 }
 
 // ========== Keyboards ==========
@@ -489,11 +489,27 @@ const mainKeyboard = {
   ]
 };
 
+const getModeKb = (currentMode) => ({
+  inline_keyboard: [
+    [{
+      text: `${currentMode === 'spot-futures' ? '✅ ' : ''}📈 Spot-Futures`,
+      callback_data: 'set_mode_spot-futures'
+    }],
+    [{
+      text: `${currentMode === 'funding-rate' ? '✅ ' : ''}💰 Funding Rate`,
+      callback_data: 'set_mode_funding-rate'
+    }],
+    [{ text: '🔙 Назад', callback_data: 'filters' }]
+  ]
+});
+
 const getFiltersKb = (f) => ({
   inline_keyboard: [
-    [{ text: `📉 Мин. спред: ${f.minSpread}%`, callback_data: 'filter_min_spread' }],
+    [{ text: `📊 Режим: ${f.mode === 'spot-futures' ? 'Spot-Futures' : 'Funding Rate'}`, callback_data: 'select_mode' }],
+    f.mode === 'spot-futures' 
+      ? [{ text: `📉 Мин. спред: ${f.minSpread}%`, callback_data: 'filter_min_spread' }]
+      : [{ text: `💰 Мин. прибыль: ${f.minFundingProfit}%/день`, callback_data: 'filter_funding_profit' }],
     [{ text: `📊 Мин. объём: ${f.minVolume > 0 ? '$' + (f.minVolume/1000).toFixed(0) + 'K' : 'Нет'}`, callback_data: 'filter_min_volume' }],
-    [{ text: `${f.showCrossExchange ? '✅' : '❌'} Межбиржевые`, callback_data: 'toggle_cross' }],
     [{ text: '💱 Биржи', callback_data: 'filter_exchanges' }],
     [{ text: '🔙 Назад', callback_data: 'back' }]
   ]
@@ -510,10 +526,18 @@ const getExchangesKb = (enabled) => ({
   ]
 });
 
-const getSpreadKb = (type) => ({
+const getSpreadKb = () => ({
   inline_keyboard: [
-    [0.5, 1, 1.5, 2, 2.5].map(v => ({ text: `${v}%`, callback_data: `set_${type}_spread_${v}` })),
-    [3, 4, 5, 7, 10].map(v => ({ text: `${v}%`, callback_data: `set_${type}_spread_${v}` })),
+    [0.5, 1, 1.5, 2, 2.5].map(v => ({ text: `${v}%`, callback_data: `set_min_spread_${v}` })),
+    [3, 4, 5, 7, 10].map(v => ({ text: `${v}%`, callback_data: `set_min_spread_${v}` })),
+    [{ text: '🔙 Назад', callback_data: 'filters' }]
+  ]
+});
+
+const getFundingProfitKb = () => ({
+  inline_keyboard: [
+    [0.05, 0.1, 0.2, 0.3, 0.5].map(v => ({ text: `${v}%`, callback_data: `set_funding_profit_${v}` })),
+    [0.75, 1, 1.5, 2, 3].map(v => ({ text: `${v}%`, callback_data: `set_funding_profit_${v}` })),
     [{ text: '🔙 Назад', callback_data: 'filters' }]
   ]
 });
@@ -543,30 +567,15 @@ async function handleMessage(msg) {
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
       `Я SpreadUP Bot для арбитража криптовалют.\n\n` +
-      `📊 <b>Биржи:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget\n\n` +
-      `🔗 <b>Межбиржевой арбитраж:</b> spot на одной бирже, futures на другой!\n\n` +
+      `📊 <b>Режимы работы:</b>\n` +
+      `• 📈 <b>Spot-Futures</b> - спред между спотом и фьючерсом\n` +
+      `• 💰 <b>Funding Rate</b> - разница фандинг рейтов между биржами\n\n` +
+      `💱 <b>Биржи:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget\n\n` +
       `✅ Вы подписаны на уведомления!`,
       mainKeyboard
     );
   } else if (text === '/status') {
-    const lastUpdate = priceCache.lastUpdate 
-      ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU')
-      : 'Нет данных';
-    
-    const crossCount = priceCache.opportunities.filter(o => o.isCrossExchange).length;
-    
-    await sendMessage(chatId,
-      `📊 <b>Статус мониторинга</b>\n\n` +
-      `🔄 Состояние: ✅ Активен\n` +
-      `⏱ Последнее обновление: ${lastUpdate}\n` +
-      `📊 Найдено возможностей: ${priceCache.opportunities.length}\n` +
-      `🔗 Межбиржевых: ${crossCount}\n\n` +
-      `⚙️ <b>Ваши фильтры:</b>\n` +
-      `📉 Спред: ${f.minSpread}%+\n` +
-      `📊 Мин. объём: ${f.minVolume > 0 ? '$' + (f.minVolume/1000).toFixed(0) + 'K' : 'нет'}\n` +
-      `💱 Биржи: ${f.enabledExchanges.join(', ')}`,
-      mainKeyboard
-    );
+    await handleStatus(chatId);
   } else if (text === '/filters') {
     await sendMessage(chatId, '⚙️ <b>Фильтры уведомлений</b>', getFiltersKb(f));
   } else if (text === '/scan') {
@@ -576,14 +585,19 @@ async function handleMessage(msg) {
   } else if (text === '/help') {
     await sendMessage(chatId,
       `📖 <b>Справка по SpreadUP Bot</b>\n\n` +
+      `<b>Режимы работы:</b>\n\n` +
+      `📈 <b>Spot-Futures арбитраж:</b>\n` +
+      `Находим минимальную цену спота и максимальную цену фьючерса.\n` +
+      `Спред = (futures - spot) / spot × 100%\n\n` +
+      `💰 <b>Funding Rate арбитраж:</b>\n` +
+      `Находим где funding rate высокий (шортим, получаем платёж) и где низкий (лонгуем, платим меньше).\n` +
+      `Прибыль = разница в funding × 3 раза в день\n\n` +
       `<b>Команды:</b>\n` +
       `/start - Начать работу\n` +
       `/scan - Сканировать рынок\n` +
-      `/top - Топ-10 спредов\n` +
-      `/filters - Настроить фильтры\n` +
-      `/status - Статус\n\n` +
-      `<b>Биржи:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget\n\n` +
-      `🔗 <b>Межбиржевой арбитраж</b> - находит лучшие связки между разными биржами!`,
+      `/top - Топ результатов\n` +
+      `/filters - Настройки\n` +
+      `/status - Статус`,
       mainKeyboard
     );
   } else {
@@ -591,19 +605,55 @@ async function handleMessage(msg) {
   }
 }
 
+async function handleStatus(chatId) {
+  const lastUpdate = priceCache.lastUpdate 
+    ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU')
+    : 'Нет данных';
+  const f = getFilters(chatId);
+  const crossCount = priceCache.opportunities.filter(o => o.isCrossExchange).length;
+  
+  await sendMessage(chatId,
+    `📊 <b>Статус мониторинга</b>\n\n` +
+    `🔄 Состояние: ✅ Активен\n` +
+    `⏱ Последнее обновление: ${lastUpdate}\n\n` +
+    `📈 <b>Spot-Futures:</b>\n` +
+    `   Возможностей: ${priceCache.opportunities.length}\n` +
+    `   Межбиржевых: ${crossCount}\n\n` +
+    `💰 <b>Funding Rate:</b>\n` +
+    `   Возможностей: ${priceCache.fundingOpps.length}\n\n` +
+    `⚙️ <b>Текущий режим:</b> ${f.mode === 'spot-futures' ? 'Spot-Futures' : 'Funding Rate'}\n` +
+    `💱 Биржи: ${f.enabledExchanges.length}/6`,
+    mainKeyboard
+  );
+}
+
 async function handleScan(chatId) {
   await sendMessage(chatId, '🔄 <b>Сканирование рынка...</b>');
   
-  const opportunities = await scanAllExchanges();
+  const { spotFuturesOpps, fundingOpps } = await scanAllExchanges();
   const f = getFilters(chatId);
-  const filtered = filterOpportunities(opportunities, f);
+  
+  if (f.mode === 'spot-futures') {
+    await showSpotFuturesResults(chatId, spotFuturesOpps, f);
+  } else {
+    await showFundingRateResults(chatId, fundingOpps, f);
+  }
+}
+
+async function showSpotFuturesResults(chatId, opportunities, f) {
+  const filtered = opportunities.filter(opp => {
+    if (opp.spreadPercent < f.minSpread) return false;
+    if (f.minVolume > 0 && opp.volume24h > 0 && opp.volume24h < f.minVolume) return false;
+    if (!f.enabledExchanges.includes(opp.spotExchange)) return false;
+    if (!f.enabledExchanges.includes(opp.futuresExchange)) return false;
+    return true;
+  });
   
   if (filtered.length === 0) {
     await sendMessage(chatId,
-      `📊 <b>Результаты сканирования</b>\n\n` +
-      `Найдено: ${opportunities.length} возможностей\n` +
-      `После фильтрации: 0\n\n` +
-      `Попробуйте изменить фильтры.`,
+      `📊 <b>Spot-Futures результаты</b>\n\n` +
+      `Найдено: ${opportunities.length}\n` +
+      `После фильтрации: 0`,
       mainKeyboard
     );
     return;
@@ -611,8 +661,7 @@ async function handleScan(chatId) {
   
   const crossCount = filtered.filter(o => o.isCrossExchange).length;
   
-  let text = `📊 <b>Результаты сканирования</b>\n\n`;
-  text += `🔍 Фильтры: спред ≥${f.minSpread}%, объём ${f.minVolume > 0 ? '≥$' + (f.minVolume/1000).toFixed(0) + 'K' : 'нет'}\n\n`;
+  let text = `📊 <b>Spot-Futures результаты</b>\n\n`;
   text += `Найдено: ${opportunities.length} | После фильтрации: ${filtered.length}\n`;
   text += `🔗 Межбиржевых: ${crossCount}\n\n`;
   
@@ -631,33 +680,53 @@ async function handleScan(chatId) {
   await sendMessage(chatId, text, mainKeyboard);
 }
 
-async function handleTop(chatId) {
-  const opportunities = priceCache.opportunities;
-  const f = getFilters(chatId);
-  const filtered = filterOpportunities(opportunities, f);
+async function showFundingRateResults(chatId, opportunities, f) {
+  const filtered = opportunities.filter(opp => {
+    if (opp.dailyProfitPercent < f.minFundingProfit) return false;
+    if (f.minVolume > 0 && opp.volume24h > 0 && opp.volume24h < f.minVolume) return false;
+    if (!f.enabledExchanges.includes(opp.longExchange)) return false;
+    if (!f.enabledExchanges.includes(opp.shortExchange)) return false;
+    return true;
+  });
   
   if (filtered.length === 0) {
     await sendMessage(chatId,
-      `📊 <b>Топ спредов</b>\n\n` +
-      `Нет данных. Используйте /scan для сканирования.`,
+      `💰 <b>Funding Rate результаты</b>\n\n` +
+      `Найдено: ${opportunities.length}\n` +
+      `После фильтрации: 0`,
       mainKeyboard
     );
     return;
   }
   
-  let text = `📊 <b>Топ-10 спредов</b>\n\n`;
+  let text = `💰 <b>Funding Rate результаты</b>\n\n`;
+  text += `Найдено: ${opportunities.length} | После фильтрации: ${filtered.length}\n\n`;
   
-  const medals = ['🥇', '🥈', '🥉'];
   for (let i = 0; i < Math.min(10, filtered.length); i++) {
     const opp = filtered[i];
-    const medal = medals[i] || `${i+1}.`;
-    const emoji = opp.spreadPercent >= 5 ? '🔥' : '⚡';
-    const crossEmoji = opp.isCrossExchange ? '🔗' : '';
-    text += `${medal} ${emoji} ${crossEmoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(2)}%\n`;
-    text += `    ${opp.spotExchange} → ${opp.futuresExchange}\n`;
+    const emoji = opp.dailyProfitPercent >= 1 ? '🔥' : opp.dailyProfitPercent >= 0.5 ? '⚡' : '📊';
+    
+    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: +${opp.dailyProfitPercent.toFixed(2)}%/день\n`;
+    text += `   📈 Long: ${opp.longExchange} (${(opp.longRate * 100).toFixed(3)}%)\n`;
+    text += `   📉 Short: ${opp.shortExchange} (${(opp.shortRate * 100).toFixed(3)}%)\n\n`;
   }
   
   await sendMessage(chatId, text, mainKeyboard);
+}
+
+async function handleTop(chatId) {
+  const f = getFilters(chatId);
+  
+  if (priceCache.lastUpdate === null) {
+    await sendMessage(chatId, '📊 Нет данных. Используйте /scan для сканирования.', mainKeyboard);
+    return;
+  }
+  
+  if (f.mode === 'spot-futures') {
+    await showSpotFuturesResults(chatId, priceCache.opportunities, f);
+  } else {
+    await showFundingRateResults(chatId, priceCache.fundingOpps, f);
+  }
 }
 
 async function handleCallback(cb) {
@@ -683,11 +752,18 @@ async function handleCallback(cb) {
     await handleScan(chatId);
   } else if (data === 'top') {
     await handleTop(chatId);
-  } else if (data === 'toggle_cross') {
-    f.showCrossExchange = !f.showCrossExchange;
-    await sendMessage(chatId, `🔗 Межбиржевые: ${f.showCrossExchange ? 'включены' : 'отключены'}`, getFiltersKb(f));
+  } else if (data === 'select_mode') {
+    await sendMessage(chatId, '📊 <b>Выберите режим:</b>', getModeKb(f.mode));
+  } else if (data === 'set_mode_spot-futures') {
+    f.mode = 'spot-futures';
+    await sendMessage(chatId, '✅ Режим: Spot-Futures', getFiltersKb(f));
+  } else if (data === 'set_mode_funding-rate') {
+    f.mode = 'funding-rate';
+    await sendMessage(chatId, '✅ Режим: Funding Rate', getFiltersKb(f));
   } else if (data === 'filter_min_spread') {
-    await sendMessage(chatId, '📉 <b>Минимальный спред</b>', getSpreadKb('min'));
+    await sendMessage(chatId, '📉 <b>Минимальный спред</b>', getSpreadKb());
+  } else if (data === 'filter_funding_profit') {
+    await sendMessage(chatId, '💰 <b>Минимальная прибыль в день</b>', getFundingProfitKb());
   } else if (data === 'filter_min_volume') {
     await sendMessage(chatId, '📊 <b>Минимальный объём</b>', getVolumeKb());
   } else if (data === 'filter_exchanges') {
@@ -695,6 +771,9 @@ async function handleCallback(cb) {
   } else if (data.startsWith('set_min_spread_')) {
     f.minSpread = parseFloat(data.replace('set_min_spread_', ''));
     await sendMessage(chatId, `📉 Мин. спред: ${f.minSpread}%`, getFiltersKb(f));
+  } else if (data.startsWith('set_funding_profit_')) {
+    f.minFundingProfit = parseFloat(data.replace('set_funding_profit_', ''));
+    await sendMessage(chatId, `💰 Мин. прибыль: ${f.minFundingProfit}%/день`, getFiltersKb(f));
   } else if (data.startsWith('set_volume_')) {
     f.minVolume = parseFloat(data.replace('set_volume_', ''));
     await sendMessage(chatId, `📊 Мин. объём: ${f.minVolume > 0 ? '$' + (f.minVolume/1000).toFixed(0) + 'K' : 'нет'}`, getFiltersKb(f));
@@ -713,22 +792,90 @@ async function handleCallback(cb) {
   }
 }
 
-async function handleStatus(chatId) {
-  const lastUpdate = priceCache.lastUpdate 
-    ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU')
-    : 'Нет данных';
-  const f = getFilters(chatId);
-  const crossCount = priceCache.opportunities.filter(o => o.isCrossExchange).length;
+// ========== Alerts ==========
+
+async function sendAlerts(spotFuturesOpps, fundingOpps) {
+  const subscribers = Object.keys(userSubscribed).filter(id => userSubscribed[id]);
+  if (subscribers.length === 0) return;
   
-  await sendMessage(chatId,
-    `📊 <b>Статус</b>\n\n` +
-    `🔄 Активен\n` +
-    `⏱ ${lastUpdate}\n` +
-    `📊 Возможностей: ${priceCache.opportunities.length}\n` +
-    `🔗 Межбиржевых: ${crossCount}\n` +
-    `💱 Биржи: ${f.enabledExchanges.length}/6`,
-    mainKeyboard
-  );
+  const now = Date.now();
+  const cooldownMs = 20 * 60 * 1000;
+  
+  // Spot-Futures alerts
+  for (const opp of spotFuturesOpps) {
+    if (opp.spreadPercent < 3) continue;
+    
+    const assetKey = `sf_${opp.baseAsset}`;
+    if (lastAlertTime[assetKey] && (now - lastAlertTime[assetKey]) < cooldownMs) continue;
+    
+    const crossEmoji = opp.isCrossExchange ? '🔗 ' : '';
+    const volStr = opp.volume24h > 0 
+      ? (opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`)
+      : 'н/д';
+    
+    const message = `
+🔥 <b>АРБИТРАЖ!</b> ${crossEmoji}
+
+📊 <b>${opp.baseAsset}/USDT</b>
+📈 Спред: ${opp.spreadPercent.toFixed(2)}%
+
+💰 Spot (${opp.spotExchange}): $${formatPrice(opp.spotPrice)}
+💰 Futures (${opp.futuresExchange}): $${formatPrice(opp.futuresPrice)}
+
+📊 Объём: ${volStr}
+🔗 <a href="${opp.spotUrl}">Spot</a> | <a href="${opp.futuresUrl}">Futures</a>
+`;
+    
+    for (const chatId of subscribers) {
+      const filters = getFilters(chatId);
+      if (filters.mode !== 'spot-futures') continue;
+      if (opp.spreadPercent < filters.minSpread) continue;
+      
+      try {
+        await sendMessage(chatId, message);
+      } catch (e) {}
+    }
+    
+    lastAlertTime[assetKey] = now;
+  }
+  
+  // Funding Rate alerts
+  for (const opp of fundingOpps) {
+    if (opp.dailyProfitPercent < 0.5) continue;
+    
+    const assetKey = `fr_${opp.baseAsset}`;
+    if (lastAlertTime[assetKey] && (now - lastAlertTime[assetKey]) < cooldownMs) continue;
+    
+    const message = `
+💰 <b>FUNDING RATE АРБИТРАЖ!</b>
+
+📊 <b>${opp.baseAsset}/USDT</b>
+📈 Прибыль: +${opp.dailyProfitPercent.toFixed(2)}%/день
+
+📈 Long: ${opp.longExchange} (${(opp.longRate * 100).toFixed(3)}%)
+📉 Short: ${opp.shortExchange} (${(opp.shortRate * 100).toFixed(3)}%)
+
+🔗 <a href="${opp.longUrl}">Long</a> | <a href="${opp.shortUrl}">Short</a>
+`;
+    
+    for (const chatId of subscribers) {
+      const filters = getFilters(chatId);
+      if (filters.mode !== 'funding-rate') continue;
+      if (opp.dailyProfitPercent < filters.minFundingProfit) continue;
+      
+      try {
+        await sendMessage(chatId, message);
+      } catch (e) {}
+    }
+    
+    lastAlertTime[assetKey] = now;
+  }
+}
+
+function formatPrice(price) {
+  if (price >= 1000) return price.toFixed(2);
+  if (price >= 1) return price.toFixed(4);
+  return price.toFixed(6);
 }
 
 // ========== Main Handler ==========
@@ -739,28 +886,28 @@ export default async function handler(req, res) {
     
     if (cron === 'scan') {
       try {
-        const opportunities = await scanAllExchanges();
-        await sendAlerts(opportunities);
+        const { spotFuturesOpps, fundingOpps } = await scanAllExchanges();
+        await sendAlerts(spotFuturesOpps, fundingOpps);
         return res.status(200).json({ 
-          status: 'scanned', 
-          opportunities: opportunities.length,
-          crossExchange: opportunities.filter(o => o.isCrossExchange).length,
+          status: 'scanned',
+          spotFutures: spotFuturesOpps.length,
+          fundingRate: fundingOpps.length,
           timestamp: new Date().toISOString()
         });
       } catch (e) {
-        console.error('Cron scan error:', e);
+        console.error('Cron error:', e);
         return res.status(500).json({ error: e.message });
       }
     }
     
     return res.status(200).json({
       status: 'SpreadUP Bot Active',
-      version: '3.0.0',
-      features: ['cross-exchange', '6-exchanges'],
+      version: '4.0.0',
+      modes: ['spot-futures', 'funding-rate'],
       exchanges: ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'],
-      opportunities: priceCache.opportunities.length,
-      lastUpdate: priceCache.lastUpdate,
-      users: Object.keys(userFilters).length
+      spotFuturesOpps: priceCache.opportunities.length,
+      fundingOpps: priceCache.fundingOpps.length,
+      lastUpdate: priceCache.lastUpdate
     });
   }
 
