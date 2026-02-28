@@ -1,15 +1,12 @@
 /**
- * SpreadUP Bot v5.1 - Enhanced Arbitrage Scanner
+ * SpreadUP Bot v5.2 - Multi-Mode Arbitrage Scanner
  * 
- * Features:
- * - Spot-Futures Arbitrage (cross-exchange)
- * - Funding Rate Arbitrage
- * - Jupiter (Solana DEX) Integration
- * - HTX (Huobi) Integration
- * - Price Alerts
- * - Spread History
+ * Modes:
+ * 1. Spot-Futures - Spot to Futures arbitrage
+ * 2. Futures-Futures - Cross-exchange futures arbitrage
+ * 3. Funding Rate - Funding rate arbitrage
  * 
- * Exchanges: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Jupiter
+ * Exchanges: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, Jupiter
  */
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8476184475:AAEka7mj2waSrH1XV4z-PWwuMFxwTVVsbHg';
@@ -23,8 +20,8 @@ let priceCache = {
   fundingRates: {},
   lastUpdate: null,
   opportunities: [],
+  futuresFuturesOpps: [],
   fundingOpps: [],
-  spreadHistory: {},
   exchangeStats: {}
 };
 
@@ -34,7 +31,8 @@ const userSubscribed = {};
 const lastAlertTime = {};
 
 // All supported exchanges
-const ALL_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Jupiter'];
+const ALL_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Lbank', 'Jupiter'];
+const FUTURES_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
 
 // ========== Telegram API ==========
 
@@ -293,12 +291,11 @@ async function fetchBitgetPrices() {
   }
 }
 
-// HTX (Huobi) - Only spot, futures API not publicly available
+// HTX (Huobi) - Only spot
 async function fetchHTXPrices() {
   try {
     const spot = {}, volumes = {};
     
-    // Popular trading pairs to fetch
     const symbols = [
       'btcusdt', 'ethusdt', 'solusdt', 'bnbusdt', 'xrpusdt', 'adausdt', 'dogeusdt',
       'avaxusdt', 'dotusdt', 'maticusdt', 'linkusdt', 'uniusdt', 'atomusdt', 'ltcusdt',
@@ -307,7 +304,6 @@ async function fetchHTXPrices() {
       'shibusdt', 'bonkusdt', 'jupusdt', 'wifusdt', 'popcatusdt', 'neirusdt', 'taousdt'
     ];
     
-    // Fetch prices in parallel with Promise.all
     const fetchPromises = symbols.map(async (sym) => {
       try {
         const res = await fetch(`https://api.htx.com/market/detail/merged?symbol=${sym}`, {
@@ -324,9 +320,7 @@ async function fetchHTXPrices() {
             return { symbol, price, vol };
           }
         }
-      } catch (e) {
-        // Continue if one request fails
-      }
+      } catch (e) {}
       return null;
     });
     
@@ -347,6 +341,40 @@ async function fetchHTXPrices() {
   }
 }
 
+// Lbank - Only spot
+async function fetchLbankPrices() {
+  try {
+    const spot = {}, volumes = {};
+    
+    const res = await fetch('https://api.lbank.info/v2/supplement/ticker/price.do', {
+      signal: AbortSignal.timeout(15000)
+    });
+    const data = await res.json();
+    
+    if (data.result && data.data) {
+      for (const item of data.data) {
+        const symbolStr = item.symbol || '';
+        if (symbolStr.endsWith('_usdt')) {
+          const base = symbolStr.replace('_usdt', '').toUpperCase();
+          const symbol = base + 'USDT';
+          const price = parseFloat(item.price);
+          
+          if (price > 0 && base.length >= 2 && base.length <= 10) {
+            spot[symbol] = price;
+            volumes[symbol] = 0;
+          }
+        }
+      }
+    }
+    
+    console.log(`Lbank: ${Object.keys(spot).length} spot prices`);
+    return { spot, futures: {}, volumes, funding: {}, exchange: 'Lbank' };
+  } catch (e) {
+    console.error('Lbank error:', e.message);
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Lbank' };
+  }
+}
+
 // Jupiter (Solana DEX via Dexscreener)
 async function fetchJupiterPrices() {
   try {
@@ -364,9 +392,7 @@ async function fetchJupiterPrices() {
       { symbol: 'JITO', address: 'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn' },
       { symbol: 'BOME', address: 'UKMMBLkZqCrwKBJcHUY1GJSBVGSjimXePVvb5HjTRSt' },
       { symbol: 'POPCAT', address: '7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr' },
-      { symbol: 'MYRO', address: 'HhJpBhRRn4g56VsyLuT8DL5Bv31HkXqsrahEHhMjob6J' },
-      { symbol: 'MEW', address: 'MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5' },
-      { symbol: 'NEIRO', address: '8Ki8DpuWNxu9VsYzKvnv6hP9nB5XK9QPC8eSNyZYPQvy' }
+      { symbol: 'MEW', address: 'MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5' }
     ];
     
     const fetchPromises = popularTokens.map(async (token) => {
@@ -387,11 +413,7 @@ async function fetchJupiterPrices() {
             const symbol = token.symbol.toUpperCase() + 'USDT';
             const price = parseFloat(bestPair.priceUsd);
             if (price > 0) {
-              return {
-                symbol,
-                price,
-                volume: parseFloat(bestPair.volume?.h24 || 0)
-              };
+              return { symbol, price, volume: parseFloat(bestPair.volume?.h24 || 0) };
             }
           }
         }
@@ -429,6 +451,7 @@ async function scanAllExchanges() {
     fetchOKXPrices(),
     fetchBitgetPrices(),
     fetchHTXPrices(),
+    fetchLbankPrices(),
     fetchJupiterPrices()
   ]);
   
@@ -456,7 +479,7 @@ async function scanAllExchanges() {
     }
   }
   
-  // === Spot-Futures Opportunities ===
+  // === 1. Spot-Futures Opportunities ===
   const spotFuturesOpps = [];
   
   for (const symbol in allSpot) {
@@ -505,7 +528,55 @@ async function scanAllExchanges() {
   
   spotFuturesOpps.sort((a, b) => b.spreadPercent - a.spreadPercent);
   
-  // === Funding Rate Opportunities ===
+  // === 2. Futures-Futures Opportunities ===
+  const futuresFuturesOpps = [];
+  
+  for (const symbol in allFutures) {
+    const futuresPrices = allFutures[symbol];
+    if (Object.keys(futuresPrices).length < 2) continue;
+    
+    let lowEx = null, lowPrice = Infinity;
+    let highEx = null, highPrice = 0;
+    
+    for (const ex of FUTURES_EXCHANGES) {
+      if (futuresPrices[ex] && futuresPrices[ex] > 0) {
+        if (futuresPrices[ex] < lowPrice) {
+          lowPrice = futuresPrices[ex];
+          lowEx = ex;
+        }
+        if (futuresPrices[ex] > highPrice) {
+          highPrice = futuresPrices[ex];
+          highEx = ex;
+        }
+      }
+    }
+    
+    if (!lowEx || !highEx || lowEx === highEx) continue;
+    if (lowPrice <= 0 || highPrice <= 0) continue;
+    
+    const spread = ((highPrice - lowPrice) / lowPrice) * 100;
+    
+    if (spread > 0) {
+      futuresFuturesOpps.push({
+        type: 'futures-futures',
+        symbol,
+        baseAsset: symbol.replace('USDT', ''),
+        lowPrice,
+        highPrice,
+        spreadPercent: spread,
+        buyExchange: lowEx,
+        sellExchange: highEx,
+        volume24h: allVolumes[symbol] || 0,
+        buyUrl: getUrl(lowEx, symbol, 'futures'),
+        sellUrl: getUrl(highEx, symbol, 'futures'),
+        allFuturesPrices: futuresPrices
+      });
+    }
+  }
+  
+  futuresFuturesOpps.sort((a, b) => b.spreadPercent - a.spreadPercent);
+  
+  // === 3. Funding Rate Opportunities ===
   const fundingOpps = [];
   
   for (const symbol in allFunding) {
@@ -516,7 +587,7 @@ async function scanAllExchanges() {
     let maxRate = -Infinity, maxEx = null;
     let minRate = Infinity, minEx = null;
     
-    for (const ex of ALL_EXCHANGES) {
+    for (const ex of FUTURES_EXCHANGES) {
       if (rates[ex] !== undefined && futuresPrices[ex]) {
         if (rates[ex] > maxRate) {
           maxRate = rates[ex];
@@ -559,16 +630,14 @@ async function scanAllExchanges() {
   priceCache.volumes = allVolumes;
   priceCache.fundingRates = allFunding;
   priceCache.opportunities = spotFuturesOpps;
+  priceCache.futuresFuturesOpps = futuresFuturesOpps;
   priceCache.fundingOpps = fundingOpps;
   priceCache.exchangeStats = exchangeStats;
   priceCache.lastUpdate = new Date();
   
-  const jupiterOpps = spotFuturesOpps.filter(o => o.isDexInvolved).length;
-  const htxOpps = spotFuturesOpps.filter(o => o.spotExchange === 'HTX').length;
+  console.log(`Found: ${spotFuturesOpps.length} spot-futures, ${futuresFuturesOpps.length} futures-futures, ${fundingOpps.length} funding`);
   
-  console.log(`Found ${spotFuturesOpps.length} spot-futures (${jupiterOpps} Jupiter, ${htxOpps} HTX), ${fundingOpps.length} funding`);
-  
-  return { spotFuturesOpps, fundingOpps, exchangeStats };
+  return { spotFuturesOpps, futuresFuturesOpps, fundingOpps, exchangeStats };
 }
 
 function getUrl(exchange, symbol, type) {
@@ -595,6 +664,7 @@ function getUrl(exchange, symbol, type) {
       ? `https://www.bitget.com/spot/${symbol}`
       : `https://www.bitget.com/futures/usdt/${symbol}`,
     'HTX': `https://www.htx.com/trade/${base}-usdt`,
+    'Lbank': `https://www.lbank.com/trade/${base}_usdt`,
     'Jupiter': `https://jup.ag/swap/${base}-USDC`
   };
   
@@ -606,12 +676,11 @@ function getUrl(exchange, symbol, type) {
 function getFilters(chatId) {
   if (!userFilters[chatId]) {
     userFilters[chatId] = {
-      mode: 'spot-futures',
+      mode: 'spot-futures',  // 'spot-futures', 'futures-futures', 'funding-rate'
       minSpread: 0.5,
       minFundingProfit: 0.1,
       minVolume: 0,
-      enabledExchanges: [...ALL_EXCHANGES],
-      showJupiterOnly: false
+      enabledExchanges: [...ALL_EXCHANGES]
     };
   }
   return userFilters[chatId];
@@ -629,13 +698,22 @@ const mainKeyboard = {
 
 const getFiltersKb = (f) => ({
   inline_keyboard: [
-    [{ text: `📊 Режим: ${f.mode === 'spot-futures' ? 'Spot-Futures' : 'Funding Rate'}`, callback_data: 'select_mode' }],
-    f.mode === 'spot-futures' 
-      ? [{ text: `📉 Мин. спред: ${f.minSpread}%`, callback_data: 'filter_min_spread' }]
-      : [{ text: `💰 Мин. прибыль: ${f.minFundingProfit}%/день`, callback_data: 'filter_funding_profit' }],
+    [{ text: `📊 Режим: ${getModeName(f.mode)}`, callback_data: 'select_mode' }],
+    f.mode === 'funding-rate' 
+      ? [{ text: `💰 Мин. прибыль: ${f.minFundingProfit}%/день`, callback_data: 'filter_funding_profit' }]
+      : [{ text: `📉 Мин. спред: ${f.minSpread}%`, callback_data: 'filter_min_spread' }],
     [{ text: `📊 Мин. объём: ${f.minVolume > 0 ? '$' + (f.minVolume/1000).toFixed(0) + 'K' : 'Нет'}`, callback_data: 'filter_min_volume' }],
     [{ text: '💱 Биржи', callback_data: 'filter_exchanges' }],
     [{ text: '🔙 Назад', callback_data: 'back' }]
+  ]
+});
+
+const getModeKb = (currentMode) => ({
+  inline_keyboard: [
+    [{ text: `${currentMode === 'spot-futures' ? '✅ ' : ''}📈 Spot-Futures`, callback_data: 'set_mode_spot-futures' }],
+    [{ text: `${currentMode === 'futures-futures' ? '✅ ' : ''}🔄 Futures-Futures`, callback_data: 'set_mode_futures-futures' }],
+    [{ text: `${currentMode === 'funding-rate' ? '✅ ' : ''}💰 Funding Rate`, callback_data: 'set_mode_funding-rate' }],
+    [{ text: '🔙 Назад', callback_data: 'filters' }]
   ]
 });
 
@@ -650,18 +728,10 @@ const getExchangesKb = (enabled) => ({
   ]
 });
 
-const getModeKb = (currentMode) => ({
-  inline_keyboard: [
-    [{ text: `${currentMode === 'spot-futures' ? '✅ ' : ''}📈 Spot-Futures`, callback_data: 'set_mode_spot-futures' }],
-    [{ text: `${currentMode === 'funding-rate' ? '✅ ' : ''}💰 Funding Rate`, callback_data: 'set_mode_funding-rate' }],
-    [{ text: '🔙 Назад', callback_data: 'filters' }]
-  ]
-});
-
 const getSpreadKb = () => ({
   inline_keyboard: [
-    [0.5, 1, 1.5, 2, 2.5].map(v => ({ text: `${v}%`, callback_data: `set_min_spread_${v}` })),
-    [3, 4, 5, 7, 10].map(v => ({ text: `${v}%`, callback_data: `set_min_spread_${v}` })),
+    [0.3, 0.5, 0.7, 1, 1.5].map(v => ({ text: `${v}%`, callback_data: `set_min_spread_${v}` })),
+    [2, 3, 5, 7, 10].map(v => ({ text: `${v}%`, callback_data: `set_min_spread_${v}` })),
     [{ text: '🔙 Назад', callback_data: 'filters' }]
   ]
 });
@@ -686,6 +756,15 @@ const getVolumeKb = () => ({
   ]
 });
 
+function getModeName(mode) {
+  const names = {
+    'spot-futures': '📈 Spot-Futures',
+    'futures-futures': '🔄 Futures-Futures',
+    'funding-rate': '💰 Funding Rate'
+  };
+  return names[mode] || mode;
+}
+
 // ========== Message Handlers ==========
 
 async function handleMessage(msg) {
@@ -698,13 +777,14 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v5.1 для арбитража криптовалют.\n\n` +
-      `📊 <b>Режимы работы:</b>\n` +
-      `• 📈 <b>Spot-Futures</b> - спред между спотом и фьючерсом\n` +
-      `• 💰 <b>Funding Rate</b> - разница фандинг рейтов\n\n` +
-      `💱 <b>Биржи:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Jupiter\n\n` +
-      `🆕 <b>HTX</b> (бывшая Huobi) теперь доступна!\n` +
-      `🔮 <b>Jupiter</b> - Solana DEX с уникальными токенами!\n\n` +
+      `Я SpreadUP Bot v5.2 для арбитража криптовалют.\n\n` +
+      `📊 <b>3 режима работы:</b>\n` +
+      `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
+      `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
+      `• 💰 <b>Funding Rate</b> - фандинг арбитраж\n\n` +
+      `💱 <b>9 бирж:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, Jupiter\n\n` +
+      `🆕 <b>Новые биржи:</b> HTX и Lbank!\n` +
+      `🆕 <b>Новый режим:</b> Futures-Futures арбитраж!\n\n` +
       `✅ Вы подписаны на уведомления!`,
       mainKeyboard
     );
@@ -718,15 +798,17 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v5.1</b>\n\n` +
-      `📈 <b>Spot-Futures арбитраж:</b>\n` +
-      `Находим мин. цену спота и макс. цену фьючерса.\n\n` +
-      `💰 <b>Funding Rate арбитраж:</b>\n` +
-      `Находим разницу в funding rate между биржами.\n\n` +
-      `💱 <b>Биржи:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Jupiter\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v5.2</b>\n\n` +
+      `<b>Режимы работы:</b>\n\n` +
+      `📈 <b>Spot-Futures:</b>\n` +
+      `Покупаем спот дешевле, продаём фьючерс дороже.\n\n` +
+      `🔄 <b>Futures-Futures:</b>\n` +
+      `Покупаем фьючерс на одной бирже, продаём на другой.\n\n` +
+      `💰 <b>Funding Rate:</b>\n` +
+      `Long где фандинг низкий, Short где высокий.\n\n` +
       `<b>Команды:</b>\n` +
-      `/start - Начать работу\n` +
-      `/scan - Сканировать рынок\n` +
+      `/start - Начать\n` +
+      `/scan - Сканировать\n` +
       `/top - Топ результатов\n` +
       `/filters - Настройки\n` +
       `/status - Статус`,
@@ -742,26 +824,21 @@ async function handleStatus(chatId) {
     ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU')
     : 'Нет данных';
   const f = getFilters(chatId);
-  const crossCount = priceCache.opportunities.filter(o => o.isCrossExchange).length;
-  const jupiterCount = priceCache.opportunities.filter(o => o.isDexInvolved).length;
-  const htxCount = priceCache.opportunities.filter(o => o.spotExchange === 'HTX').length;
   
-  let text = `📊 <b>Статус мониторинга v5.1</b>\n\n`;
+  let text = `📊 <b>Статус мониторинга v5.2</b>\n\n`;
   text += `🔄 Состояние: ✅ Активен\n`;
   text += `⏱ Последнее обновление: ${lastUpdate}\n\n`;
   
-  text += `📈 <b>Spot-Futures:</b>\n`;
-  text += `   Всего: ${priceCache.opportunities.length}\n`;
-  text += `   🔗 Межбиржевых: ${crossCount}\n`;
-  text += `   🔮 С Jupiter: ${jupiterCount}\n`;
-  text += `   🆕 С HTX: ${htxCount}\n\n`;
-  
+  text += `📈 <b>Spot-Futures:</b> ${priceCache.opportunities.length}\n`;
+  text += `🔄 <b>Futures-Futures:</b> ${priceCache.futuresFuturesOpps.length}\n`;
   text += `💰 <b>Funding Rate:</b> ${priceCache.fundingOpps.length}\n\n`;
   
   if (priceCache.exchangeStats && Object.keys(priceCache.exchangeStats).length > 0) {
     text += `📊 <b>Данные с бирж:</b>\n`;
     for (const [ex, stats] of Object.entries(priceCache.exchangeStats)) {
-      text += `   ${ex}: ${stats.spot} spot, ${stats.futures} futures\n`;
+      const spotIcon = stats.spot > 0 ? '✅' : '❌';
+      const futuresIcon = stats.futures > 0 ? '✅' : '❌';
+      text += `   ${ex}: ${spotIcon}${stats.spot} spot ${futuresIcon}${stats.futures} fut\n`;
     }
   }
   
@@ -771,11 +848,13 @@ async function handleStatus(chatId) {
 async function handleScan(chatId) {
   await sendMessage(chatId, '🔄 <b>Сканирование рынка...</b>');
   
-  const { spotFuturesOpps, fundingOpps } = await scanAllExchanges();
+  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps } = await scanAllExchanges();
   const f = getFilters(chatId);
   
   if (f.mode === 'spot-futures') {
     await showSpotFuturesResults(chatId, spotFuturesOpps, f);
+  } else if (f.mode === 'futures-futures') {
+    await showFuturesFuturesResults(chatId, futuresFuturesOpps, f);
   } else {
     await showFundingRateResults(chatId, fundingOpps, f);
   }
@@ -792,27 +871,56 @@ async function showSpotFuturesResults(chatId, opportunities, f) {
   
   if (filtered.length === 0) {
     await sendMessage(chatId,
-      `📊 <b>Spot-Futures результаты</b>\n\n` +
-      `Найдено: ${opportunities.length}\n` +
-      `После фильтрации: 0`,
+      `📈 <b>Spot-Futures результаты</b>\n\n` +
+      `Найдено: ${opportunities.length}\nПосле фильтрации: 0`,
       mainKeyboard
     );
     return;
   }
   
-  let text = `📊 <b>Spot-Futures результаты</b>\n\n`;
+  let text = `📈 <b>Spot-Futures результаты</b>\n\n`;
   text += `Найдено: ${opportunities.length} | Фильтр: ${filtered.length}\n\n`;
   
   for (let i = 0; i < Math.min(5, filtered.length); i++) {
     const opp = filtered[i];
-    const emoji = opp.spreadPercent >= 5 ? '🔥' : opp.spreadPercent >= 2 ? '⚡' : '📊';
-    const crossEmoji = opp.isCrossExchange ? '🔗 ' : '';
-    const dexEmoji = opp.isDexInvolved ? '🔮 ' : '';
-    const htxEmoji = opp.spotExchange === 'HTX' ? '🆕 ' : '';
+    const emoji = opp.spreadPercent >= 3 ? '🔥' : opp.spreadPercent >= 1 ? '⚡' : '📊';
+    const dexEmoji = opp.isDexInvolved ? '🔮' : '';
     
     text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(2)}%\n`;
-    text += `   ${dexEmoji}${htxEmoji}${crossEmoji}${opp.spotExchange} → ${opp.futuresExchange}\n`;
-    text += `   Spot: $${formatPrice(opp.spotPrice)} | Futures: $${formatPrice(opp.futuresPrice)}\n\n`;
+    text += `   ${dexEmoji}${opp.spotExchange} ($${formatPrice(opp.spotPrice)}) → ${opp.futuresExchange} ($${formatPrice(opp.futuresPrice)})\n\n`;
+  }
+  
+  await sendMessage(chatId, text, mainKeyboard);
+}
+
+async function showFuturesFuturesResults(chatId, opportunities, f) {
+  const filtered = opportunities.filter(opp => {
+    if (opp.spreadPercent < f.minSpread) return false;
+    if (!f.enabledExchanges.includes(opp.buyExchange)) return false;
+    if (!f.enabledExchanges.includes(opp.sellExchange)) return false;
+    return true;
+  });
+  
+  if (filtered.length === 0) {
+    await sendMessage(chatId,
+      `🔄 <b>Futures-Futures результаты</b>\n\n` +
+      `Найдено: ${opportunities.length}\nПосле фильтрации: 0`,
+      mainKeyboard
+    );
+    return;
+  }
+  
+  let text = `🔄 <b>Futures-Futures результаты</b>\n\n`;
+  text += `Найдено: ${opportunities.length} | Фильтр: ${filtered.length}\n\n`;
+  text += `<i>Купить фьючерс дешевле → Продать дороже</i>\n\n`;
+  
+  for (let i = 0; i < Math.min(6, filtered.length); i++) {
+    const opp = filtered[i];
+    const emoji = opp.spreadPercent >= 1 ? '🔥' : opp.spreadPercent >= 0.5 ? '⚡' : '📊';
+    
+    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(3)}%\n`;
+    text += `   📥 ${opp.buyExchange}: $${formatPrice(opp.lowPrice)}\n`;
+    text += `   📤 ${opp.sellExchange}: $${formatPrice(opp.highPrice)}\n\n`;
   }
   
   await sendMessage(chatId, text, mainKeyboard);
@@ -829,8 +937,7 @@ async function showFundingRateResults(chatId, opportunities, f) {
   if (filtered.length === 0) {
     await sendMessage(chatId,
       `💰 <b>Funding Rate результаты</b>\n\n` +
-      `Найдено: ${opportunities.length}\n` +
-      `После фильтрации: 0`,
+      `Найдено: ${opportunities.length}\nПосле фильтрации: 0`,
       mainKeyboard
     );
     return;
@@ -844,8 +951,8 @@ async function showFundingRateResults(chatId, opportunities, f) {
     const emoji = opp.dailyProfitPercent >= 1 ? '🔥' : opp.dailyProfitPercent >= 0.5 ? '⚡' : '📊';
     
     text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: +${opp.dailyProfitPercent.toFixed(2)}%/день\n`;
-    text += `   Long: ${opp.longExchange} (${(opp.longRate * 100).toFixed(3)}%)\n`;
-    text += `   Short: ${opp.shortExchange} (${(opp.shortRate * 100).toFixed(3)}%)\n\n`;
+    text += `   📈 Long: ${opp.longExchange} (${(opp.longRate * 100).toFixed(4)}%)\n`;
+    text += `   📉 Short: ${opp.shortExchange} (${(opp.shortRate * 100).toFixed(4)}%)\n\n`;
   }
   
   await sendMessage(chatId, text, mainKeyboard);
@@ -861,6 +968,8 @@ async function handleTop(chatId) {
   
   if (f.mode === 'spot-futures') {
     await showSpotFuturesResults(chatId, priceCache.opportunities, f);
+  } else if (f.mode === 'futures-futures') {
+    await showFuturesFuturesResults(chatId, priceCache.futuresFuturesOpps, f);
   } else {
     await showFundingRateResults(chatId, priceCache.fundingOpps, f);
   }
@@ -894,6 +1003,9 @@ async function handleCallback(cb) {
   } else if (data === 'set_mode_spot-futures') {
     f.mode = 'spot-futures';
     await sendMessage(chatId, '✅ Режим: Spot-Futures', getFiltersKb(f));
+  } else if (data === 'set_mode_futures-futures') {
+    f.mode = 'futures-futures';
+    await sendMessage(chatId, '✅ Режим: Futures-Futures', getFiltersKb(f));
   } else if (data === 'set_mode_funding-rate') {
     f.mode = 'funding-rate';
     await sendMessage(chatId, '✅ Режим: Funding Rate', getFiltersKb(f));
@@ -931,21 +1043,22 @@ async function handleCallback(cb) {
 
 // ========== Alerts ==========
 
-async function sendAlerts(spotFuturesOpps, fundingOpps) {
+async function sendAlerts(spotFuturesOpps, futuresFuturesOpps, fundingOpps) {
   const subscribers = Object.keys(userSubscribed).filter(id => userSubscribed[id]);
   if (subscribers.length === 0) return;
   
   const now = Date.now();
   const cooldownMs = 20 * 60 * 1000;
   
+  // Spot-Futures alerts
   for (const opp of spotFuturesOpps) {
-    if (opp.spreadPercent < 3) continue;
+    if (opp.spreadPercent < 2) continue;
     
     const assetKey = `sf_${opp.baseAsset}`;
     if (lastAlertTime[assetKey] && (now - lastAlertTime[assetKey]) < cooldownMs) continue;
     
     const message = `
-🔥 <b>АРБИТРАЖ!</b>
+🔥 <b>SPOT-FUTURES АРБИТРАЖ!</b>
 
 📊 <b>${opp.baseAsset}/USDT</b>
 📈 Спред: ${opp.spreadPercent.toFixed(2)}%
@@ -961,9 +1074,37 @@ async function sendAlerts(spotFuturesOpps, fundingOpps) {
       if (filters.mode !== 'spot-futures') continue;
       if (opp.spreadPercent < filters.minSpread) continue;
       
-      try {
-        await sendMessage(chatId, message);
-      } catch (e) {}
+      try { await sendMessage(chatId, message); } catch (e) {}
+    }
+    
+    lastAlertTime[assetKey] = now;
+  }
+  
+  // Futures-Futures alerts
+  for (const opp of futuresFuturesOpps) {
+    if (opp.spreadPercent < 0.5) continue;
+    
+    const assetKey = `ff_${opp.baseAsset}`;
+    if (lastAlertTime[assetKey] && (now - lastAlertTime[assetKey]) < cooldownMs) continue;
+    
+    const message = `
+🔄 <b>FUTURES-FUTURES АРБИТРАЖ!</b>
+
+📊 <b>${opp.baseAsset}/USDT</b>
+📈 Спред: ${opp.spreadPercent.toFixed(3)}%
+
+📥 Купить: ${opp.buyExchange} ($${formatPrice(opp.lowPrice)})
+📤 Продать: ${opp.sellExchange} ($${formatPrice(opp.highPrice)})
+
+🔗 <a href="${opp.buyUrl}">Buy</a> | <a href="${opp.sellUrl}">Sell</a>
+`;
+    
+    for (const chatId of subscribers) {
+      const filters = getFilters(chatId);
+      if (filters.mode !== 'futures-futures') continue;
+      if (opp.spreadPercent < filters.minSpread) continue;
+      
+      try { await sendMessage(chatId, message); } catch (e) {}
     }
     
     lastAlertTime[assetKey] = now;
@@ -985,14 +1126,13 @@ export default async function handler(req, res) {
     
     if (cron === 'scan') {
       try {
-        const { spotFuturesOpps, fundingOpps } = await scanAllExchanges();
-        await sendAlerts(spotFuturesOpps, fundingOpps);
+        const { spotFuturesOpps, futuresFuturesOpps, fundingOpps } = await scanAllExchanges();
+        await sendAlerts(spotFuturesOpps, futuresFuturesOpps, fundingOpps);
         return res.status(200).json({ 
           status: 'scanned',
           spotFutures: spotFuturesOpps.length,
+          futuresFutures: futuresFuturesOpps.length,
           fundingRate: fundingOpps.length,
-          jupiterOpps: spotFuturesOpps.filter(o => o.isDexInvolved).length,
-          htxOpps: spotFuturesOpps.filter(o => o.spotExchange === 'HTX').length,
           exchangeStats: priceCache.exchangeStats,
           timestamp: new Date().toISOString()
         });
@@ -1004,9 +1144,11 @@ export default async function handler(req, res) {
     
     return res.status(200).json({
       status: 'SpreadUP Bot Active',
-      version: '5.1.0',
+      version: '5.2.0',
+      modes: ['spot-futures', 'futures-futures', 'funding-rate'],
       exchanges: ALL_EXCHANGES,
       spotFuturesOpps: priceCache.opportunities.length,
+      futuresFuturesOpps: priceCache.futuresFuturesOpps.length,
       fundingOpps: priceCache.fundingOpps.length,
       lastUpdate: priceCache.lastUpdate,
       exchangeStats: priceCache.exchangeStats
