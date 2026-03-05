@@ -1,10 +1,11 @@
 /**
- * SpreadUP Bot v5.4 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v5.5 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
  * 2. Futures-Futures - Cross-exchange futures arbitrage
  * 3. Funding Rate - Funding rate arbitrage
+ * 4. Price vs Fair Price - Deviation from weighted average price
  * 
  * Exchanges: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
  * 
@@ -29,6 +30,7 @@ let priceCache = {
   opportunities: [],
   futuresFuturesOpps: [],
   fundingOpps: [],
+  fairPriceOpps: [],
   exchangeStats: {}
 };
 
@@ -649,6 +651,85 @@ async function scanAllExchanges() {
   
   fundingOpps.sort((a, b) => b.dailyProfitPercent - a.dailyProfitPercent);
   
+  // === 4. Price vs Fair Price Opportunities ===
+  const fairPriceOpps = [];
+  
+  for (const symbol in allSpot) {
+    const spotPrices = allSpot[symbol];
+    const exchanges = Object.keys(spotPrices);
+    
+    // Need at least 2 exchanges to calculate fair price
+    if (exchanges.length < 2) continue;
+    
+    // Calculate volume-weighted average price (fair price)
+    let totalVolume = 0;
+    let weightedSum = 0;
+    
+    for (const ex of exchanges) {
+      const price = spotPrices[ex];
+      // Use volume from cache or estimate based on exchange reliability
+      const vol = allVolumes[symbol] || 100000;
+      if (price > 0) {
+        weightedSum += price * vol;
+        totalVolume += vol;
+      }
+    }
+    
+    if (totalVolume === 0) continue;
+    
+    const fairPrice = weightedSum / totalVolume;
+    
+    // Find exchanges with biggest deviation from fair price
+    let maxDeviation = 0;
+    let maxDevEx = null;
+    let maxDevPrice = 0;
+    let minDeviation = 0;
+    let minDevEx = null;
+    let minDevPrice = 0;
+    
+    for (const ex of exchanges) {
+      const price = spotPrices[ex];
+      if (price <= 0 || !fairPrice) continue;
+      
+      const deviation = ((price - fairPrice) / fairPrice) * 100;
+      
+      // Filter out extreme deviations (junk)
+      if (Math.abs(deviation) > MAX_SPREAD_PERCENT) continue;
+      
+      if (deviation > maxDeviation) {
+        maxDeviation = deviation;
+        maxDevEx = ex;
+        maxDevPrice = price;
+      }
+      if (deviation < minDeviation) {
+        minDeviation = deviation;
+        minDevEx = ex;
+        minDevPrice = price;
+      }
+    }
+    
+    // Only include if we have meaningful deviation
+    if (maxDevEx && minDevEx && Math.abs(maxDeviation - minDeviation) >= 0.3) {
+      fairPriceOpps.push({
+        type: 'fair-price',
+        symbol,
+        baseAsset: symbol.replace('USDT', ''),
+        fairPrice,
+        overvaluedExchange: maxDevEx,
+        overvaluedPrice: maxDevPrice,
+        overvaluedDeviation: maxDeviation,
+        undervaluedExchange: minDevEx,
+        undervaluedPrice: minDevPrice,
+        undervaluedDeviation: minDeviation,
+        spreadPercent: maxDeviation - minDeviation,
+        volume24h: allVolumes[symbol] || 0,
+        allSpotPrices: spotPrices
+      });
+    }
+  }
+  
+  fairPriceOpps.sort((a, b) => b.spreadPercent - a.spreadPercent);
+  
   // Update cache
   priceCache.spot = allSpot;
   priceCache.futures = allFutures;
@@ -657,12 +738,13 @@ async function scanAllExchanges() {
   priceCache.opportunities = spotFuturesOpps;
   priceCache.futuresFuturesOpps = futuresFuturesOpps;
   priceCache.fundingOpps = fundingOpps;
+  priceCache.fairPriceOpps = fairPriceOpps;
   priceCache.exchangeStats = exchangeStats;
   priceCache.lastUpdate = new Date();
   
-  console.log(`Found: ${spotFuturesOpps.length} spot-futures, ${futuresFuturesOpps.length} futures-futures, ${fundingOpps.length} funding (max spread ${MAX_SPREAD_PERCENT}%)`);
+  console.log(`Found: ${spotFuturesOpps.length} spot-futures, ${futuresFuturesOpps.length} futures-futures, ${fundingOpps.length} funding, ${fairPriceOpps.length} fair-price (max spread ${MAX_SPREAD_PERCENT}%)`);
   
-  return { spotFuturesOpps, futuresFuturesOpps, fundingOpps, exchangeStats };
+  return { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, exchangeStats };
 }
 
 function getUrl(exchange, symbol, type) {
@@ -727,6 +809,7 @@ const getModeKb = (currentMode) => ({
     [{ text: `${currentMode === 'spot-futures' ? '✅ ' : ''}📈 Spot-Futures`, callback_data: 'set_mode_spot-futures' }],
     [{ text: `${currentMode === 'futures-futures' ? '✅ ' : ''}🔄 Futures-Futures`, callback_data: 'set_mode_futures-futures' }],
     [{ text: `${currentMode === 'funding-rate' ? '✅ ' : ''}💰 Funding Rate`, callback_data: 'set_mode_funding-rate' }],
+    [{ text: `${currentMode === 'fair-price' ? '✅ ' : ''}⚖️ Price vs Fair`, callback_data: 'set_mode_fair-price' }],
     [{ text: '🔙 Назад', callback_data: 'filters' }]
   ]
 });
@@ -768,7 +851,12 @@ const getVolumeKb = () => ({
 });
 
 function getModeName(mode) {
-  return { 'spot-futures': '📈 Spot-Futures', 'futures-futures': '🔄 Futures-Futures', 'funding-rate': '💰 Funding Rate' }[mode] || mode;
+  return { 
+    'spot-futures': '📈 Spot-Futures', 
+    'futures-futures': '🔄 Futures-Futures', 
+    'funding-rate': '💰 Funding Rate',
+    'fair-price': '⚖️ Price vs Fair' 
+  }[mode] || mode;
 }
 
 // ========== Message Handlers ==========
@@ -783,11 +871,12 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v5.4 для арбитража криптовалют.\n\n` +
-      `📊 <b>3 режима работы:</b>\n` +
+      `Я SpreadUP Bot v5.5 для арбитража криптовалют.\n\n` +
+      `📊 <b>4 режима работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
-      `• 💰 <b>Funding Rate</b> - фандинг арбитраж\n\n` +
+      `• 💰 <b>Funding Rate</b> - фандинг арбитраж\n` +
+      `• ⚖️ <b>Price vs Fair</b> - отклонение от справедливой цены\n\n` +
       `💱 <b>10 бирж:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter\n\n` +
       `🔒 <b>Фильтры:</b> спред ≤${MAX_SPREAD_PERCENT}% | объём ≥$500K\n\n` +
       `✅ Вы подписаны на уведомления!`,
@@ -803,11 +892,12 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v5.4</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v5.5</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
-      `💰 Funding Rate: Long низкий / Short высокий\n\n` +
+      `💰 Funding Rate: Long низкий / Short высокий\n` +
+      `⚖️ Price vs Fair: отклонение от справедливой цены\n\n` +
       `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n` +
       `📊 Мин. объём: $500K\n\n` +
       `<b>Команды:</b>\n/start, /scan, /top, /filters, /status`,
@@ -821,12 +911,13 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v5.4</b>\n`;
+  let text = `📊 <b>Статус v5.5</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
   text += `🔄 Futures-Futures: ${priceCache.futuresFuturesOpps.length}\n`;
-  text += `💰 Funding Rate: ${priceCache.fundingOpps.length}\n\n`;
+  text += `💰 Funding Rate: ${priceCache.fundingOpps.length}\n`;
+  text += `⚖️ Price vs Fair: ${priceCache.fairPriceOpps.length}\n\n`;
   
   if (priceCache.exchangeStats && Object.keys(priceCache.exchangeStats).length > 0) {
     text += `📊 <b>Биржи:</b>\n`;
@@ -840,12 +931,13 @@ async function handleStatus(chatId) {
 
 async function handleScan(chatId) {
   await sendMessage(chatId, '🔄 <b>Сканирование...</b>');
-  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps } = await scanAllExchanges();
+  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps } = await scanAllExchanges();
   const f = getFilters(chatId);
   
   if (f.mode === 'spot-futures') await showSpotFuturesResults(chatId, spotFuturesOpps, f);
   else if (f.mode === 'futures-futures') await showFuturesFuturesResults(chatId, futuresFuturesOpps, f);
-  else await showFundingRateResults(chatId, fundingOpps, f);
+  else if (f.mode === 'funding-rate') await showFundingRateResults(chatId, fundingOpps, f);
+  else await showFairPriceResults(chatId, fairPriceOpps, f);
 }
 
 async function showSpotFuturesResults(chatId, opportunities, f) {
@@ -928,6 +1020,34 @@ async function showFundingRateResults(chatId, opportunities, f) {
   await sendMessage(chatId, text, mainKeyboard);
 }
 
+async function showFairPriceResults(chatId, opportunities, f) {
+  const filtered = opportunities.filter(opp => {
+    if (opp.spreadPercent < f.minSpread) return false;
+    if (f.minVolume > 0 && opp.volume24h < f.minVolume) return false;
+    if (!f.enabledExchanges.includes(opp.undervaluedExchange)) return false;
+    if (!f.enabledExchanges.includes(opp.overvaluedExchange)) return false;
+    return true;
+  });
+  
+  if (filtered.length === 0) {
+    await sendMessage(chatId, `⚖️ <b>Price vs Fair</b>\nНайдено: ${opportunities.length} | После фильтрации: 0`, mainKeyboard);
+    return;
+  }
+  
+  let text = `⚖️ <b>Price vs Fair Price</b>\nНайдено: ${opportunities.length} | Фильтр: ${filtered.length}\n\n`;
+  
+  for (let i = 0; i < Math.min(6, filtered.length); i++) {
+    const opp = filtered[i];
+    const emoji = opp.spreadPercent >= 3 ? '🔥' : opp.spreadPercent >= 1 ? '⚡' : '📊';
+    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(2)}%\n`;
+    text += `   💵 Fair: $${formatPrice(opp.fairPrice)}\n`;
+    text += `   🟢 ${opp.undervaluedExchange}: ${opp.undervaluedDeviation.toFixed(2)}%\n`;
+    text += `   🔴 ${opp.overvaluedExchange}: +${opp.overvaluedDeviation.toFixed(2)}%\n\n`;
+  }
+  
+  await sendMessage(chatId, text, mainKeyboard);
+}
+
 async function handleTop(chatId) {
   const f = getFilters(chatId);
   if (priceCache.lastUpdate === null) {
@@ -936,7 +1056,8 @@ async function handleTop(chatId) {
   }
   if (f.mode === 'spot-futures') await showSpotFuturesResults(chatId, priceCache.opportunities, f);
   else if (f.mode === 'futures-futures') await showFuturesFuturesResults(chatId, priceCache.futuresFuturesOpps, f);
-  else await showFundingRateResults(chatId, priceCache.fundingOpps, f);
+  else if (f.mode === 'funding-rate') await showFundingRateResults(chatId, priceCache.fundingOpps, f);
+  else await showFairPriceResults(chatId, priceCache.fairPriceOpps, f);
 }
 
 async function handleCallback(cb) {
@@ -957,6 +1078,7 @@ async function handleCallback(cb) {
   else if (data === 'set_mode_spot-futures') { f.mode = 'spot-futures'; await sendMessage(chatId, '✅ Spot-Futures', getFiltersKb(f)); }
   else if (data === 'set_mode_futures-futures') { f.mode = 'futures-futures'; await sendMessage(chatId, '✅ Futures-Futures', getFiltersKb(f)); }
   else if (data === 'set_mode_funding-rate') { f.mode = 'funding-rate'; await sendMessage(chatId, '✅ Funding Rate', getFiltersKb(f)); }
+  else if (data === 'set_mode_fair-price') { f.mode = 'fair-price'; await sendMessage(chatId, '✅ Price vs Fair', getFiltersKb(f)); }
   else if (data === 'filter_min_spread') await sendMessage(chatId, '📉 <b>Мин. спред</b>', getSpreadKb());
   else if (data === 'filter_funding_profit') await sendMessage(chatId, '💰 <b>Мин. прибыль</b>', getFundingProfitKb());
   else if (data === 'filter_min_volume') await sendMessage(chatId, '📊 <b>Мин. объём (USDT)</b>', getVolumeKb());
@@ -1036,13 +1158,14 @@ export default async function handler(req, res) {
     
     if (cron === 'scan') {
       try {
-        const { spotFuturesOpps, futuresFuturesOpps, fundingOpps } = await scanAllExchanges();
+        const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps } = await scanAllExchanges();
         await sendAlerts(spotFuturesOpps, futuresFuturesOpps, fundingOpps);
         return res.status(200).json({ 
           status: 'scanned',
           spotFutures: spotFuturesOpps.length,
           futuresFutures: futuresFuturesOpps.length,
           fundingRate: fundingOpps.length,
+          fairPrice: fairPriceOpps.length,
           maxSpread: MAX_SPREAD_PERCENT,
           minVolume: 500000,
           exchangeStats: priceCache.exchangeStats,
@@ -1055,14 +1178,15 @@ export default async function handler(req, res) {
     
     return res.status(200).json({
       status: 'SpreadUP Bot Active',
-      version: '5.4.0',
-      modes: ['spot-futures', 'futures-futures', 'funding-rate'],
+      version: '5.5.0',
+      modes: ['spot-futures', 'futures-futures', 'funding-rate', 'fair-price'],
       exchanges: ALL_EXCHANGES,
       maxSpread: MAX_SPREAD_PERCENT,
       minVolume: 500000,
       spotFuturesOpps: priceCache.opportunities.length,
       futuresFuturesOpps: priceCache.futuresFuturesOpps.length,
       fundingOpps: priceCache.fundingOpps.length,
+      fairPriceOpps: priceCache.fairPriceOpps.length,
       exchangeStats: priceCache.exchangeStats
     });
   }
