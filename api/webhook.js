@@ -1,11 +1,12 @@
 /**
- * SpreadUP Bot v5.5 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v6.0 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
  * 2. Futures-Futures - Cross-exchange futures arbitrage
  * 3. Funding Rate - Funding rate arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
+ * 5. Triangular Arbitrage - Intra-exchange triangle arb
  * 
  * Exchanges: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
  * 
@@ -26,11 +27,13 @@ let priceCache = {
   futures: {},
   volumes: {},
   fundingRates: {},
+  allPairs: {}, // All trading pairs for triangular arb
   lastUpdate: null,
   opportunities: [],
   futuresFuturesOpps: [],
   fundingOpps: [],
   fairPriceOpps: [],
+  triangularOpps: [],
   exchangeStats: {}
 };
 
@@ -42,6 +45,9 @@ const lastAlertTime = {};
 // All supported exchanges (10 total)
 const ALL_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Lbank', 'KuCoin', 'Jupiter'];
 const FUTURES_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
+
+// Exchanges that support triangular arbitrage (have many pairs)
+const TRIANGLE_EXCHANGES = ['MEXC', 'Gate.io', 'OKX', 'Bybit', 'Bitget', 'KuCoin'];
 
 // ========== Telegram API ==========
 
@@ -79,12 +85,22 @@ async function fetchMEXCPrices() {
     const futuresData = await futuresRes.json();
     const fundingData = await fundingRes.json();
     
-    const spot = {}, futures = {}, volumes = {}, funding = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {}, allPairs = {};
     
+    // All pairs for triangular arbitrage
     for (const item of spotData) {
-      if (item.symbol.endsWith('USDT')) {
-        spot[item.symbol] = parseFloat(item.lastPrice);
-        volumes[item.symbol] = parseFloat(item.quoteVolume) || 0;
+      const symbol = item.symbol;
+      const price = parseFloat(item.lastPrice);
+      const vol = parseFloat(item.quoteVolume) || 0;
+      
+      if (price > 0) {
+        allPairs[symbol] = { price, volume: vol };
+        
+        // Also store USDT pairs for other modes
+        if (symbol.endsWith('USDT')) {
+          spot[symbol] = price;
+          volumes[symbol] = vol;
+        }
       }
     }
     
@@ -102,10 +118,10 @@ async function fetchMEXCPrices() {
       }
     }
     
-    return { spot, futures, volumes, funding, exchange: 'MEXC' };
+    return { spot, futures, volumes, funding, allPairs, exchange: 'MEXC' };
   } catch (e) {
     console.error('MEXC error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'MEXC' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'MEXC' };
   }
 }
 
@@ -119,13 +135,22 @@ async function fetchGateIOPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {}, funding = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {}, allPairs = {};
     
     for (const item of spotData) {
-      if (item.currency_pair.endsWith('_USDT')) {
-        const symbol = item.currency_pair.replace('_', '');
-        spot[symbol] = parseFloat(item.last);
-        volumes[symbol] = parseFloat(item.quote_volume) || 0;
+      const pair = item.currency_pair;
+      const price = parseFloat(item.last);
+      const vol = parseFloat(item.quote_volume) || 0;
+      
+      if (price > 0) {
+        // Convert BTC_USDT to BTCUSDT format
+        const symbol = pair.replace('_', '');
+        allPairs[symbol] = { price, volume: vol };
+        
+        if (pair.endsWith('_USDT')) {
+          spot[symbol] = price;
+          volumes[symbol] = vol;
+        }
       }
     }
     
@@ -137,10 +162,10 @@ async function fetchGateIOPrices() {
       }
     }
     
-    return { spot, futures, volumes, funding, exchange: 'Gate.io' };
+    return { spot, futures, volumes, funding, allPairs, exchange: 'Gate.io' };
   } catch (e) {
     console.error('Gate.io error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Gate.io' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'Gate.io' };
   }
 }
 
@@ -155,14 +180,22 @@ async function fetchBingXPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {}, funding = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {}, allPairs = {};
     
     if (spotData.data) {
       for (const item of spotData.data) {
-        if (item.symbol.endsWith('-USDT')) {
-          const symbol = item.symbol.replace('-', '');
-          spot[symbol] = parseFloat(item.lastPrice);
-          volumes[symbol] = parseFloat(item.quoteVolume) || 0;
+        const pair = item.symbol;
+        const price = parseFloat(item.lastPrice);
+        const vol = parseFloat(item.quoteVolume) || 0;
+        
+        if (price > 0) {
+          const symbol = pair.replace('-', '');
+          allPairs[symbol] = { price, volume: vol };
+          
+          if (pair.endsWith('-USDT')) {
+            spot[symbol] = price;
+            volumes[symbol] = vol;
+          }
         }
       }
     }
@@ -180,10 +213,10 @@ async function fetchBingXPrices() {
       }
     }
     
-    return { spot, futures, volumes, funding, exchange: 'BingX' };
+    return { spot, futures, volumes, funding, allPairs, exchange: 'BingX' };
   } catch (e) {
     console.error('BingX error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'BingX' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'BingX' };
   }
 }
 
@@ -197,13 +230,21 @@ async function fetchBybitPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {}, funding = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {}, allPairs = {};
     
     if (spotData.result?.list) {
       for (const item of spotData.result.list) {
-        if (item.symbol.endsWith('USDT')) {
-          spot[item.symbol] = parseFloat(item.lastPrice);
-          volumes[item.symbol] = parseFloat(item.turnover24h) || 0;
+        const symbol = item.symbol;
+        const price = parseFloat(item.lastPrice);
+        const vol = parseFloat(item.turnover24h) || 0;
+        
+        if (price > 0) {
+          allPairs[symbol] = { price, volume: vol };
+          
+          if (symbol.endsWith('USDT')) {
+            spot[symbol] = price;
+            volumes[symbol] = vol;
+          }
         }
       }
     }
@@ -217,10 +258,10 @@ async function fetchBybitPrices() {
       }
     }
     
-    return { spot, futures, volumes, funding, exchange: 'Bybit' };
+    return { spot, futures, volumes, funding, allPairs, exchange: 'Bybit' };
   } catch (e) {
     console.error('Bybit error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Bybit' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'Bybit' };
   }
 }
 
@@ -234,14 +275,23 @@ async function fetchOKXPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {}, funding = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {}, allPairs = {};
     
     if (spotData.data) {
       for (const item of spotData.data) {
-        if (item.instId.endsWith('-USDT')) {
-          const symbol = item.instId.replace('-', '');
-          spot[symbol] = parseFloat(item.last);
-          volumes[symbol] = parseFloat(item.vol24h) * parseFloat(item.last) || 0;
+        const instId = item.instId;
+        const price = parseFloat(item.last);
+        const vol = parseFloat(item.vol24h) * price || 0;
+        
+        if (price > 0) {
+          // Convert BTC-USDT to BTCUSDT
+          const symbol = instId.replace('-', '');
+          allPairs[symbol] = { price, volume: vol };
+          
+          if (instId.endsWith('-USDT')) {
+            spot[symbol] = price;
+            volumes[symbol] = vol;
+          }
         }
       }
     }
@@ -256,10 +306,10 @@ async function fetchOKXPrices() {
       }
     }
     
-    return { spot, futures, volumes, funding, exchange: 'OKX' };
+    return { spot, futures, volumes, funding, allPairs, exchange: 'OKX' };
   } catch (e) {
     console.error('OKX error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'OKX' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'OKX' };
   }
 }
 
@@ -273,13 +323,21 @@ async function fetchBitgetPrices() {
     const spotData = await spotRes.json();
     const futuresData = await futuresRes.json();
     
-    const spot = {}, futures = {}, volumes = {}, funding = {};
+    const spot = {}, futures = {}, volumes = {}, funding = {}, allPairs = {};
     
     if (spotData.data) {
       for (const item of spotData.data) {
-        if (item.symbol.endsWith('USDT')) {
-          spot[item.symbol] = parseFloat(item.lastPr);
-          volumes[item.symbol] = parseFloat(item.baseVolume) * parseFloat(item.lastPr) || 0;
+        const symbol = item.symbol;
+        const price = parseFloat(item.lastPr);
+        const vol = parseFloat(item.baseVolume) * price || 0;
+        
+        if (price > 0) {
+          allPairs[symbol] = { price, volume: vol };
+          
+          if (symbol.endsWith('USDT')) {
+            spot[symbol] = price;
+            volumes[symbol] = vol;
+          }
         }
       }
     }
@@ -293,24 +351,25 @@ async function fetchBitgetPrices() {
       }
     }
     
-    return { spot, futures, volumes, funding, exchange: 'Bitget' };
+    return { spot, futures, volumes, funding, allPairs, exchange: 'Bitget' };
   } catch (e) {
     console.error('Bitget error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Bitget' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'Bitget' };
   }
 }
 
 // HTX (Huobi) - Only spot
 async function fetchHTXPrices() {
   try {
-    const spot = {}, volumes = {};
+    const spot = {}, volumes = {}, allPairs = {};
     
     const symbols = [
       'btcusdt', 'ethusdt', 'solusdt', 'bnbusdt', 'xrpusdt', 'adausdt', 'dogeusdt',
       'avaxusdt', 'dotusdt', 'maticusdt', 'linkusdt', 'uniusdt', 'atomusdt', 'ltcusdt',
       'etcusdt', 'nearusdt', 'aaveusdt', 'filusdt', 'arbusdt', 'opusdt', 'aptusdt',
       'suiusdt', 'seiusdt', 'wldusdt', 'pepeusdt', 'flokiusdt', 'injusdt', 'samusdt',
-      'shibusdt', 'bonkusdt', 'jupusdt', 'wifusdt', 'popcatusdt', 'neirusdt', 'taousdt'
+      'shibusdt', 'bonkusdt', 'jupusdt', 'wifusdt', 'popcatusdt', 'neirusdt', 'taousdt',
+      'btceth', 'ethbtc' // Cross pairs for triangular
     ];
     
     const fetchPromises = symbols.map(async (sym) => {
@@ -321,11 +380,19 @@ async function fetchHTXPrices() {
         const data = await res.json();
         
         if (data.status === 'ok' && data.tick) {
-          const symbol = sym.toUpperCase().replace('USDT', '') + 'USDT';
+          const symbol = sym.toUpperCase();
           const price = parseFloat(data.tick.close);
           const vol = parseFloat(data.tick.vol) || 0;
           
-          if (price > 0) return { symbol, price, vol };
+          if (price > 0) {
+            // Normalize symbol format
+            let normalizedSymbol = symbol;
+            if (!symbol.includes('USDT') && !symbol.includes('BTC') && !symbol.includes('ETH')) {
+              normalizedSymbol = symbol + 'USDT';
+            }
+            
+            return { symbol: normalizedSymbol, price, vol };
+          }
         }
       } catch (e) {}
       return null;
@@ -335,23 +402,27 @@ async function fetchHTXPrices() {
     
     for (const result of results) {
       if (result) {
-        spot[result.symbol] = result.price;
-        volumes[result.symbol] = result.vol;
+        allPairs[result.symbol] = { price: result.price, volume: result.vol };
+        
+        if (result.symbol.endsWith('USDT')) {
+          spot[result.symbol] = result.price;
+          volumes[result.symbol] = result.vol;
+        }
       }
     }
     
-    console.log(`HTX: ${Object.keys(spot).length} spot`);
-    return { spot, futures: {}, volumes, funding: {}, exchange: 'HTX' };
+    console.log(`HTX: ${Object.keys(spot).length} spot, ${Object.keys(allPairs).length} pairs`);
+    return { spot, futures: {}, volumes, funding: {}, allPairs, exchange: 'HTX' };
   } catch (e) {
     console.error('HTX error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'HTX' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'HTX' };
   }
 }
 
 // Lbank - Only spot
 async function fetchLbankPrices() {
   try {
-    const spot = {}, volumes = {};
+    const spot = {}, volumes = {}, allPairs = {};
     
     const res = await fetch('https://api.lbank.info/v2/supplement/ticker/price.do', {
       signal: AbortSignal.timeout(15000)
@@ -369,25 +440,25 @@ async function fetchLbankPrices() {
           if (price > 0 && base.length >= 2 && base.length <= 10) {
             spot[symbol] = price;
             volumes[symbol] = 0;
+            allPairs[symbol] = { price, volume: 0 };
           }
         }
       }
     }
     
     console.log(`Lbank: ${Object.keys(spot).length} spot`);
-    return { spot, futures: {}, volumes, funding: {}, exchange: 'Lbank' };
+    return { spot, futures: {}, volumes, funding: {}, allPairs, exchange: 'Lbank' };
   } catch (e) {
     console.error('Lbank error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Lbank' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'Lbank' };
   }
 }
 
 // KuCoin - Spot only
 async function fetchKuCoinPrices() {
   try {
-    const spot = {}, volumes = {};
+    const spot = {}, volumes = {}, allPairs = {};
     
-    // Get all tickers
     const res = await fetch('https://api.kucoin.com/api/v1/market/allTickers', {
       signal: AbortSignal.timeout(15000)
     });
@@ -395,32 +466,35 @@ async function fetchKuCoinPrices() {
     
     if (data.code === '200000' && data.data?.ticker) {
       for (const item of data.data.ticker) {
-        const symbol = item.symbol || '';
-        if (symbol.endsWith('-USDT')) {
-          const base = symbol.replace('-USDT', '');
-          const price = parseFloat(item.last);
-          const vol = parseFloat(item.volValue) || 0;
+        const symbolPair = item.symbol || '';
+        const price = parseFloat(item.last);
+        const vol = parseFloat(item.volValue) || 0;
+        
+        if (price > 0) {
+          // Convert BTC-USDT to BTCUSDT
+          const symbol = symbolPair.replace('-', '');
+          allPairs[symbol] = { price, volume: vol };
           
-          if (price > 0) {
-            spot[base + 'USDT'] = price;
-            volumes[base + 'USDT'] = vol;
+          if (symbolPair.endsWith('-USDT')) {
+            spot[symbol] = price;
+            volumes[symbol] = vol;
           }
         }
       }
     }
     
-    console.log(`KuCoin: ${Object.keys(spot).length} spot`);
-    return { spot, futures: {}, volumes, funding: {}, exchange: 'KuCoin' };
+    console.log(`KuCoin: ${Object.keys(spot).length} spot, ${Object.keys(allPairs).length} pairs`);
+    return { spot, futures: {}, volumes, funding: {}, allPairs, exchange: 'KuCoin' };
   } catch (e) {
     console.error('KuCoin error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'KuCoin' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'KuCoin' };
   }
 }
 
 // Jupiter (Solana DEX via Dexscreener)
 async function fetchJupiterPrices() {
   try {
-    const spot = {}, volumes = {};
+    const spot = {}, volumes = {}, allPairs = {};
     
     const popularTokens = [
       { symbol: 'SOL', address: 'So11111111111111111111111111111111111111112' },
@@ -458,15 +532,119 @@ async function fetchJupiterPrices() {
       if (result) {
         spot[result.symbol] = result.price;
         volumes[result.symbol] = result.volume;
+        allPairs[result.symbol] = { price: result.price, volume: result.volume };
       }
     }
     
     console.log(`Jupiter: ${Object.keys(spot).length} DEX`);
-    return { spot, futures: {}, volumes, funding: {}, exchange: 'Jupiter' };
+    return { spot, futures: {}, volumes, funding: {}, allPairs, exchange: 'Jupiter' };
   } catch (e) {
     console.error('Jupiter error:', e.message);
-    return { spot: {}, futures: {}, volumes: {}, funding: {}, exchange: 'Jupiter' };
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'Jupiter' };
   }
+}
+
+// ========== Triangular Arbitrage Calculation ==========
+
+function findTriangularOpportunities(allPairs, exchange) {
+  const opportunities = [];
+  const pairs = Object.keys(allPairs);
+  
+  // Common quote currencies for triangles
+  const quotes = ['USDT', 'BTC', 'ETH', 'USDC', 'BNB'];
+  
+  // Build pair lookup
+  const pairMap = {};
+  for (const pair of pairs) {
+    pairMap[pair] = allPairs[pair];
+  }
+  
+  // Find all possible triangles starting from USDT
+  for (const midAsset of ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX', 'MATIC', 'LINK']) {
+    // Triangle: USDT -> midAsset -> finalAsset -> USDT
+    const pair1 = midAsset + 'USDT';  // Buy midAsset with USDT
+    const pair1Alt = 'USDT' + midAsset; // Alternative naming
+    
+    if (!pairMap[pair1] && !pairMap[pair1Alt]) continue;
+    
+    // Get midAsset price in USDT
+    const midPriceUSDT = pairMap[pair1]?.price || (pairMap[pair1Alt] ? 1 / pairMap[pair1Alt].price : 0);
+    if (midPriceUSDT <= 0) continue;
+    
+    // Find all pairs with midAsset
+    for (const pair of pairs) {
+      let finalAsset = null;
+      let pair2Price = 0;
+      let pair2Volume = 0;
+      
+      // Check if pair contains midAsset
+      if (pair.startsWith(midAsset) && pair !== pair1 && pair !== pair1Alt) {
+        // Pair is midAsset/Something (e.g., BTCETH)
+        finalAsset = pair.replace(midAsset, '');
+        if (finalAsset === 'USDT' || finalAsset === midAsset) continue;
+        pair2Price = pairMap[pair].price;
+        pair2Volume = pairMap[pair].volume || 0;
+      } else if (pair.endsWith(midAsset) && pair !== pair1 && pair !== pair1Alt) {
+        // Pair is Something/midAsset (e.g., ETHBTC)
+        finalAsset = pair.replace(midAsset, '');
+        if (finalAsset === 'USDT' || finalAsset === midAsset) continue;
+        pair2Price = 1 / pairMap[pair].price; // Inverse
+        pair2Volume = pairMap[pair].volume || 0;
+      }
+      
+      if (!finalAsset || finalAsset.length < 2 || finalAsset.length > 6) continue;
+      
+      // Check if we can sell finalAsset for USDT
+      const pair3 = finalAsset + 'USDT';
+      const pair3Alt = 'USDT' + finalAsset;
+      
+      if (!pairMap[pair3] && !pairMap[pair3Alt]) continue;
+      
+      const finalPriceUSDT = pairMap[pair3]?.price || (pairMap[pair3Alt] ? 1 / pairMap[pair3Alt].price : 0);
+      if (finalPriceUSDT <= 0) continue;
+      
+      // Calculate triangle profit
+      // Start with 1000 USDT
+      const startAmount = 1000;
+      
+      // Step 1: Buy midAsset with USDT
+      const midAmount = startAmount / midPriceUSDT;
+      
+      // Step 2: Trade midAsset for finalAsset
+      const finalAmount = midAmount * pair2Price;
+      
+      // Step 3: Sell finalAsset for USDT
+      const endAmount = finalAmount * finalPriceUSDT;
+      
+      // Calculate profit percentage
+      const profitPercent = ((endAmount - startAmount) / startAmount) * 100;
+      
+      // Filter: only show profitable triangles with reasonable profit
+      if (profitPercent > 0.3 && profitPercent <= MAX_SPREAD_PERCENT) {
+        opportunities.push({
+          type: 'triangular',
+          exchange,
+          path: `USDT → ${midAsset} → ${finalAsset} → USDT`,
+          midAsset,
+          finalAsset,
+          startAmount,
+          endAmount,
+          profitPercent,
+          volume24h: Math.max(pair2Volume, pairMap[pair3]?.volume || 0, pairMap[pair1]?.volume || 0),
+          steps: [
+            { pair: pair1 || pair1Alt, action: 'buy', asset: midAsset, price: midPriceUSDT },
+            { pair: pair, action: 'trade', asset: finalAsset, price: pair2Price },
+            { pair: pair3 || pair3Alt, action: 'sell', asset: 'USDT', price: finalPriceUSDT }
+          ]
+        });
+      }
+    }
+  }
+  
+  // Sort by profit
+  opportunities.sort((a, b) => b.profitPercent - a.profitPercent);
+  
+  return opportunities;
 }
 
 // ========== Scanning ==========
@@ -487,14 +665,20 @@ async function scanAllExchanges() {
     fetchJupiterPrices()
   ]);
   
-  const allSpot = {}, allFutures = {}, allVolumes = {}, allFunding = {};
+  const allSpot = {}, allFutures = {}, allVolumes = {}, allFunding = {}, allExchangePairs = {};
   const exchangeStats = {};
   
-  for (const { spot, futures, volumes, funding, exchange } of results) {
+  for (const { spot, futures, volumes, funding, allPairs, exchange } of results) {
     exchangeStats[exchange] = {
       spot: Object.keys(spot).length,
-      futures: Object.keys(futures).length
+      futures: Object.keys(futures).length,
+      pairs: Object.keys(allPairs || {}).length
     };
+    
+    // Store all pairs for triangular arbitrage
+    if (allPairs && TRIANGLE_EXCHANGES.includes(exchange)) {
+      allExchangePairs[exchange] = allPairs;
+    }
     
     for (const symbol in spot) {
       if (!allSpot[symbol]) allSpot[symbol] = {};
@@ -510,7 +694,7 @@ async function scanAllExchanges() {
     }
   }
   
-  // === 1. Spot-Futures Opportunities (with MAX_SPREAD filter) ===
+  // === 1. Spot-Futures Opportunities ===
   const spotFuturesOpps = [];
   
   for (const symbol in allSpot) {
@@ -536,7 +720,6 @@ async function scanAllExchanges() {
     
     const spread = ((bestFuturesPrice - bestSpotPrice) / bestSpotPrice) * 100;
     
-    // FILTER: Only include spreads between 0 and MAX_SPREAD_PERCENT
     if (spread > 0 && spread <= MAX_SPREAD_PERCENT) {
       spotFuturesOpps.push({
         type: 'spot-futures',
@@ -548,7 +731,6 @@ async function scanAllExchanges() {
         spotExchange: bestSpot,
         futuresExchange: bestFutures,
         isCrossExchange: bestSpot !== bestFutures,
-        isDexInvolved: bestSpot === 'Jupiter' || bestFutures === 'Jupiter',
         volume24h: allVolumes[symbol] || 0,
         spotUrl: getUrl(bestSpot, symbol, 'spot'),
         futuresUrl: getUrl(bestFutures, symbol, 'futures'),
@@ -560,7 +742,7 @@ async function scanAllExchanges() {
   
   spotFuturesOpps.sort((a, b) => b.spreadPercent - a.spreadPercent);
   
-  // === 2. Futures-Futures Opportunities (with MAX_SPREAD filter) ===
+  // === 2. Futures-Futures Opportunities ===
   const futuresFuturesOpps = [];
   
   for (const symbol in allFutures) {
@@ -588,7 +770,6 @@ async function scanAllExchanges() {
     
     const spread = ((highPrice - lowPrice) / lowPrice) * 100;
     
-    // FILTER: Only include spreads between 0 and MAX_SPREAD_PERCENT
     if (spread > 0 && spread <= MAX_SPREAD_PERCENT) {
       futuresFuturesOpps.push({
         type: 'futures-futures',
@@ -658,16 +839,13 @@ async function scanAllExchanges() {
     const spotPrices = allSpot[symbol];
     const exchanges = Object.keys(spotPrices);
     
-    // Need at least 2 exchanges to calculate fair price
     if (exchanges.length < 2) continue;
     
-    // Calculate volume-weighted average price (fair price)
     let totalVolume = 0;
     let weightedSum = 0;
     
     for (const ex of exchanges) {
       const price = spotPrices[ex];
-      // Use volume from cache or estimate based on exchange reliability
       const vol = allVolumes[symbol] || 100000;
       if (price > 0) {
         weightedSum += price * vol;
@@ -679,7 +857,6 @@ async function scanAllExchanges() {
     
     const fairPrice = weightedSum / totalVolume;
     
-    // Find exchanges with biggest deviation from fair price
     let maxDeviation = 0;
     let maxDevEx = null;
     let maxDevPrice = 0;
@@ -693,7 +870,6 @@ async function scanAllExchanges() {
       
       const deviation = ((price - fairPrice) / fairPrice) * 100;
       
-      // Filter out extreme deviations (junk)
       if (Math.abs(deviation) > MAX_SPREAD_PERCENT) continue;
       
       if (deviation > maxDeviation) {
@@ -708,7 +884,6 @@ async function scanAllExchanges() {
       }
     }
     
-    // Only include if we have meaningful deviation
     if (maxDevEx && minDevEx && Math.abs(maxDeviation - minDeviation) >= 0.3) {
       fairPriceOpps.push({
         type: 'fair-price',
@@ -730,21 +905,36 @@ async function scanAllExchanges() {
   
   fairPriceOpps.sort((a, b) => b.spreadPercent - a.spreadPercent);
   
+  // === 5. Triangular Arbitrage Opportunities ===
+  const triangularOpps = [];
+  
+  for (const exchange of TRIANGLE_EXCHANGES) {
+    if (allExchangePairs[exchange]) {
+      const triangles = findTriangularOpportunities(allExchangePairs[exchange], exchange);
+      triangularOpps.push(...triangles);
+    }
+  }
+  
+  // Sort by profit and take top opportunities
+  triangularOpps.sort((a, b) => b.profitPercent - a.profitPercent);
+  
   // Update cache
   priceCache.spot = allSpot;
   priceCache.futures = allFutures;
   priceCache.volumes = allVolumes;
   priceCache.fundingRates = allFunding;
+  priceCache.allPairs = allExchangePairs;
   priceCache.opportunities = spotFuturesOpps;
   priceCache.futuresFuturesOpps = futuresFuturesOpps;
   priceCache.fundingOpps = fundingOpps;
   priceCache.fairPriceOpps = fairPriceOpps;
+  priceCache.triangularOpps = triangularOpps;
   priceCache.exchangeStats = exchangeStats;
   priceCache.lastUpdate = new Date();
   
-  console.log(`Found: ${spotFuturesOpps.length} spot-futures, ${futuresFuturesOpps.length} futures-futures, ${fundingOpps.length} funding, ${fairPriceOpps.length} fair-price (max spread ${MAX_SPREAD_PERCENT}%)`);
+  console.log(`Found: ${spotFuturesOpps.length} spot-futures, ${futuresFuturesOpps.length} futures-futures, ${fundingOpps.length} funding, ${fairPriceOpps.length} fair-price, ${triangularOpps.length} triangular`);
   
-  return { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, exchangeStats };
+  return { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, exchangeStats };
 }
 
 function getUrl(exchange, symbol, type) {
@@ -775,7 +965,7 @@ function getFilters(chatId) {
       mode: 'spot-futures',
       minSpread: 0.5,
       minFundingProfit: 0.1,
-      minVolume: 500000, // Default 500K volume filter
+      minVolume: 500000,
       enabledExchanges: [...ALL_EXCHANGES]
     };
   }
@@ -810,6 +1000,7 @@ const getModeKb = (currentMode) => ({
     [{ text: `${currentMode === 'futures-futures' ? '✅ ' : ''}🔄 Futures-Futures`, callback_data: 'set_mode_futures-futures' }],
     [{ text: `${currentMode === 'funding-rate' ? '✅ ' : ''}💰 Funding Rate`, callback_data: 'set_mode_funding-rate' }],
     [{ text: `${currentMode === 'fair-price' ? '✅ ' : ''}⚖️ Price vs Fair`, callback_data: 'set_mode_fair-price' }],
+    [{ text: `${currentMode === 'triangular' ? '✅ ' : ''}🔺 Triangular Arb`, callback_data: 'set_mode_triangular' }],
     [{ text: '🔙 Назад', callback_data: 'filters' }]
   ]
 });
@@ -855,7 +1046,8 @@ function getModeName(mode) {
     'spot-futures': '📈 Spot-Futures', 
     'futures-futures': '🔄 Futures-Futures', 
     'funding-rate': '💰 Funding Rate',
-    'fair-price': '⚖️ Price vs Fair' 
+    'fair-price': '⚖️ Price vs Fair',
+    'triangular': '🔺 Triangular Arb'
   }[mode] || mode;
 }
 
@@ -871,12 +1063,13 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v5.5 для арбитража криптовалют.\n\n` +
-      `📊 <b>4 режима работы:</b>\n` +
+      `Я SpreadUP Bot v6.0 для арбитража криптовалют.\n\n` +
+      `📊 <b>5 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
       `• 💰 <b>Funding Rate</b> - фандинг арбитраж\n` +
-      `• ⚖️ <b>Price vs Fair</b> - отклонение от справедливой цены\n\n` +
+      `• ⚖️ <b>Price vs Fair</b> - отклонение от справедливой цены\n` +
+      `• 🔺 <b>Triangular Arb</b> - треугольный арбитраж\n\n` +
       `💱 <b>10 бирж:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter\n\n` +
       `🔒 <b>Фильтры:</b> спред ≤${MAX_SPREAD_PERCENT}% | объём ≥$500K\n\n` +
       `✅ Вы подписаны на уведомления!`,
@@ -892,12 +1085,13 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v5.5</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v6.0</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
       `💰 Funding Rate: Long низкий / Short высокий\n` +
-      `⚖️ Price vs Fair: отклонение от справедливой цены\n\n` +
+      `⚖️ Price vs Fair: отклонение от справедливой цены\n` +
+      `🔺 Triangular: арбитраж внутри биржи (3 пары)\n\n` +
       `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n` +
       `📊 Мин. объём: $500K\n\n` +
       `<b>Команды:</b>\n/start, /scan, /top, /filters, /status`,
@@ -911,18 +1105,19 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v5.5</b>\n`;
+  let text = `📊 <b>Статус v6.0</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
   text += `🔄 Futures-Futures: ${priceCache.futuresFuturesOpps.length}\n`;
   text += `💰 Funding Rate: ${priceCache.fundingOpps.length}\n`;
-  text += `⚖️ Price vs Fair: ${priceCache.fairPriceOpps.length}\n\n`;
+  text += `⚖️ Price vs Fair: ${priceCache.fairPriceOpps.length}\n`;
+  text += `🔺 Triangular: ${priceCache.triangularOpps.length}\n\n`;
   
   if (priceCache.exchangeStats && Object.keys(priceCache.exchangeStats).length > 0) {
     text += `📊 <b>Биржи:</b>\n`;
     for (const [ex, stats] of Object.entries(priceCache.exchangeStats)) {
-      text += ` ${ex}: ${stats.spot} spot, ${stats.futures} fut\n`;
+      text += ` ${ex}: ${stats.spot} spot, ${stats.pairs || stats.spot} pairs\n`;
     }
   }
   
@@ -931,13 +1126,14 @@ async function handleStatus(chatId) {
 
 async function handleScan(chatId) {
   await sendMessage(chatId, '🔄 <b>Сканирование...</b>');
-  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps } = await scanAllExchanges();
+  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps } = await scanAllExchanges();
   const f = getFilters(chatId);
   
   if (f.mode === 'spot-futures') await showSpotFuturesResults(chatId, spotFuturesOpps, f);
   else if (f.mode === 'futures-futures') await showFuturesFuturesResults(chatId, futuresFuturesOpps, f);
   else if (f.mode === 'funding-rate') await showFundingRateResults(chatId, fundingOpps, f);
-  else await showFairPriceResults(chatId, fairPriceOpps, f);
+  else if (f.mode === 'fair-price') await showFairPriceResults(chatId, fairPriceOpps, f);
+  else await showTriangularResults(chatId, triangularOpps, f);
 }
 
 async function showSpotFuturesResults(chatId, opportunities, f) {
@@ -1048,6 +1244,34 @@ async function showFairPriceResults(chatId, opportunities, f) {
   await sendMessage(chatId, text, mainKeyboard);
 }
 
+async function showTriangularResults(chatId, opportunities, f) {
+  // Filter by enabled exchanges
+  const filtered = opportunities.filter(opp => {
+    if (opp.profitPercent < f.minSpread) return false;
+    if (f.minVolume > 0 && opp.volume24h < f.minVolume) return false;
+    if (!f.enabledExchanges.includes(opp.exchange)) return false;
+    return true;
+  });
+  
+  if (filtered.length === 0) {
+    await sendMessage(chatId, `🔺 <b>Triangular Arbitrage</b>\nНайдено: ${opportunities.length} | После фильтрации: 0`, mainKeyboard);
+    return;
+  }
+  
+  let text = `🔺 <b>Triangular Arbitrage</b>\nНайдено: ${opportunities.length} | Фильтр: ${filtered.length}\n\n`;
+  
+  for (let i = 0; i < Math.min(8, filtered.length); i++) {
+    const opp = filtered[i];
+    const emoji = opp.profitPercent >= 2 ? '🔥' : opp.profitPercent >= 1 ? '⚡' : '📊';
+    text += `${i+1}. ${emoji} <b>${opp.path}</b>\n`;
+    text += `   💱 ${opp.exchange}: +${opp.profitPercent.toFixed(2)}%\n`;
+    text += `   💵 $${opp.startAmount.toFixed(0)} → $${opp.endAmount.toFixed(2)}\n`;
+    text += `   📊 Объём: $${(opp.volume24h/1000).toFixed(0)}K\n\n`;
+  }
+  
+  await sendMessage(chatId, text, mainKeyboard);
+}
+
 async function handleTop(chatId) {
   const f = getFilters(chatId);
   if (priceCache.lastUpdate === null) {
@@ -1057,7 +1281,8 @@ async function handleTop(chatId) {
   if (f.mode === 'spot-futures') await showSpotFuturesResults(chatId, priceCache.opportunities, f);
   else if (f.mode === 'futures-futures') await showFuturesFuturesResults(chatId, priceCache.futuresFuturesOpps, f);
   else if (f.mode === 'funding-rate') await showFundingRateResults(chatId, priceCache.fundingOpps, f);
-  else await showFairPriceResults(chatId, priceCache.fairPriceOpps, f);
+  else if (f.mode === 'fair-price') await showFairPriceResults(chatId, priceCache.fairPriceOpps, f);
+  else await showTriangularResults(chatId, priceCache.triangularOpps, f);
 }
 
 async function handleCallback(cb) {
@@ -1079,6 +1304,7 @@ async function handleCallback(cb) {
   else if (data === 'set_mode_futures-futures') { f.mode = 'futures-futures'; await sendMessage(chatId, '✅ Futures-Futures', getFiltersKb(f)); }
   else if (data === 'set_mode_funding-rate') { f.mode = 'funding-rate'; await sendMessage(chatId, '✅ Funding Rate', getFiltersKb(f)); }
   else if (data === 'set_mode_fair-price') { f.mode = 'fair-price'; await sendMessage(chatId, '✅ Price vs Fair', getFiltersKb(f)); }
+  else if (data === 'set_mode_triangular') { f.mode = 'triangular'; await sendMessage(chatId, '✅ Triangular Arbitrage', getFiltersKb(f)); }
   else if (data === 'filter_min_spread') await sendMessage(chatId, '📉 <b>Мин. спред</b>', getSpreadKb());
   else if (data === 'filter_funding_profit') await sendMessage(chatId, '💰 <b>Мин. прибыль</b>', getFundingProfitKb());
   else if (data === 'filter_min_volume') await sendMessage(chatId, '📊 <b>Мин. объём (USDT)</b>', getVolumeKb());
@@ -1111,7 +1337,7 @@ async function sendAlerts(spotFuturesOpps, futuresFuturesOpps, fundingOpps) {
   
   for (const opp of spotFuturesOpps) {
     if (opp.spreadPercent < 2 || opp.spreadPercent > MAX_SPREAD_PERCENT) continue;
-    if (opp.volume24h < 500000) continue; // Default min volume filter
+    if (opp.volume24h < 500000) continue;
     const assetKey = `sf_${opp.baseAsset}`;
     if (lastAlertTime[assetKey] && (now - lastAlertTime[assetKey]) < cooldownMs) continue;
     
@@ -1128,7 +1354,7 @@ async function sendAlerts(spotFuturesOpps, futuresFuturesOpps, fundingOpps) {
   
   for (const opp of futuresFuturesOpps) {
     if (opp.spreadPercent < 0.5 || opp.spreadPercent > MAX_SPREAD_PERCENT) continue;
-    if (opp.volume24h < 500000) continue; // Default min volume filter
+    if (opp.volume24h < 500000) continue;
     const assetKey = `ff_${opp.baseAsset}`;
     if (lastAlertTime[assetKey] && (now - lastAlertTime[assetKey]) < cooldownMs) continue;
     
@@ -1158,7 +1384,7 @@ export default async function handler(req, res) {
     
     if (cron === 'scan') {
       try {
-        const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps } = await scanAllExchanges();
+        const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps } = await scanAllExchanges();
         await sendAlerts(spotFuturesOpps, futuresFuturesOpps, fundingOpps);
         return res.status(200).json({ 
           status: 'scanned',
@@ -1166,6 +1392,7 @@ export default async function handler(req, res) {
           futuresFutures: futuresFuturesOpps.length,
           fundingRate: fundingOpps.length,
           fairPrice: fairPriceOpps.length,
+          triangular: triangularOpps.length,
           maxSpread: MAX_SPREAD_PERCENT,
           minVolume: 500000,
           exchangeStats: priceCache.exchangeStats,
@@ -1178,8 +1405,8 @@ export default async function handler(req, res) {
     
     return res.status(200).json({
       status: 'SpreadUP Bot Active',
-      version: '5.5.0',
-      modes: ['spot-futures', 'futures-futures', 'funding-rate', 'fair-price'],
+      version: '6.0.0',
+      modes: ['spot-futures', 'futures-futures', 'funding-rate', 'fair-price', 'triangular'],
       exchanges: ALL_EXCHANGES,
       maxSpread: MAX_SPREAD_PERCENT,
       minVolume: 500000,
@@ -1187,6 +1414,7 @@ export default async function handler(req, res) {
       futuresFuturesOpps: priceCache.futuresFuturesOpps.length,
       fundingOpps: priceCache.fundingOpps.length,
       fairPriceOpps: priceCache.fairPriceOpps.length,
+      triangularOpps: priceCache.triangularOpps.length,
       exchangeStats: priceCache.exchangeStats
     });
   }
