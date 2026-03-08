@@ -968,12 +968,22 @@ async function scanAllExchanges() {
   const triangularOpps = [];
   
   console.log(`[TRI] Checking ${TRIANGLE_EXCHANGES.length} exchanges for triangles...`);
+  console.log(`[TRI] allExchangePairs keys: ${Object.keys(allExchangePairs).join(', ')}`);
   
   for (const exchange of TRIANGLE_EXCHANGES) {
     const pairs = allExchangePairs[exchange];
     if (pairs) {
       const pairCount = Object.keys(pairs).length;
-      console.log(`[TRI] ${exchange}: ${pairCount} pairs available`);
+      const samplePairs = Object.keys(pairs).slice(0, 5).join(', ');
+      console.log(`[TRI] ${exchange}: ${pairCount} pairs available. Sample: ${samplePairs}`);
+      
+      // Test: check if BTCUSDT exists
+      if (pairs['BTCUSDT']) {
+        console.log(`[TRI] ${exchange}: BTCUSDT found, price=${pairs['BTCUSDT'].price}, vol=${pairs['BTCUSDT'].volume}`);
+      } else {
+        console.log(`[TRI] ${exchange}: BTCUSDT NOT FOUND`);
+      }
+      
       const triangles = findTriangularOpportunities(pairs, exchange);
       console.log(`[TRI] ${exchange}: found ${triangles.length} triangles`);
       triangularOpps.push(...triangles);
