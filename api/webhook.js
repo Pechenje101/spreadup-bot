@@ -24,6 +24,22 @@ const MAX_SPREAD_PERCENT = 20;
 // MIN LIQUIDITY for triangular arbitrage - Each pair must have ≥ 500K USDT volume
 const MIN_TRIANGLE_LIQUIDITY = 500000;
 
+// Whitelist of known liquid assets for triangular arbitrage
+// Only these assets can be used as midAsset or finalAsset in triangles
+const LIQUID_ASSETS = new Set([
+  // Top cryptocurrencies by market cap
+  'BTC', 'ETH', 'BNB', 'SOL', 'XRP', 'ADA', 'DOGE', 'AVAX', 'DOT', 'MATIC',
+  'LINK', 'UNI', 'ATOM', 'LTC', 'ETC', 'NEAR', 'AAVE', 'FIL', 'ARB', 'OP',
+  'APT', 'SUI', 'SEI', 'INJ', 'TIA', 'TIA', 'WLD', 'PEPE', 'FLOKI', 'BONK',
+  'SHIB', 'WIF', 'POPCAT', 'JUP', 'RAY', 'ORCA', 'RENDER', 'IMX', 'GALA',
+  'SAND', 'MANA', 'AXS', 'GRT', 'ALGO', 'VET', 'HBAR', 'ICP', 'FET', 'RNDR',
+  'STX', 'RUNE', 'THETA', 'FTM', 'ENS', 'LDO', 'BLUR', '1INCH', 'COMP',
+  'SUSHI', 'CRV', 'SNX', 'MKR', 'YFI', 'KAVA', 'RUNE', 'CAKE', 'DYDX',
+  'LOOKS', 'GMX', 'PENDLE', 'AERO', 'VELO', 'AERO', 'ENS', 'API3', 'CVX',
+  // Stablecoins
+  'USDC', 'USDT', 'DAI', 'BUSD', 'TUSD'
+]);
+
 // Global cache
 let priceCache = {
   spot: {},
@@ -597,6 +613,10 @@ function findTriangularOpportunities(allPairs, exchange) {
       
       if (!finalAsset || finalAsset.length < 2 || finalAsset.length > 6) continue;
       
+      // ===== WHITELIST CHECK - Only known liquid assets =====
+      if (!LIQUID_ASSETS.has(midAsset)) continue;
+      if (!LIQUID_ASSETS.has(finalAsset)) continue;
+      
       // Check if we can sell finalAsset for USDT
       const pair3 = finalAsset + 'USDT';
       const pair3Alt = 'USDT' + finalAsset;
@@ -642,11 +662,14 @@ function findTriangularOpportunities(allPairs, exchange) {
           startAmount,
           endAmount,
           profitPercent,
-          volume24h: Math.max(pair2Volume, pairMap[pair3]?.volume || 0, pairMap[pair1]?.volume || 0),
+          pair1Volume,
+          pair2Volume,
+          pair3Volume,
+          volume24h: Math.max(pair1Volume, pair2Volume, pair3Volume),
           steps: [
-            { pair: pair1 || pair1Alt, action: 'buy', asset: midAsset, price: midPriceUSDT },
-            { pair: pair, action: 'trade', asset: finalAsset, price: pair2Price },
-            { pair: pair3 || pair3Alt, action: 'sell', asset: 'USDT', price: finalPriceUSDT }
+            { pair: pair1 || pair1Alt, action: 'buy', asset: midAsset, price: midPriceUSDT, volume: pair1Volume },
+            { pair: pair, action: 'trade', asset: finalAsset, price: pair2Price, volume: pair2Volume },
+            { pair: pair3 || pair3Alt, action: 'sell', asset: 'USDT', price: finalPriceUSDT, volume: pair3Volume }
           ]
         });
       }
@@ -1262,11 +1285,15 @@ async function showTriangularResults(chatId, opportunities, f) {
     if (opp.profitPercent < f.minSpread) return false;
     if (f.minVolume > 0 && opp.volume24h < f.minVolume) return false;
     if (!f.enabledExchanges.includes(opp.exchange)) return false;
+    // Additional check: all pairs must have minimum liquidity
+    if (opp.pair1Volume < MIN_TRIANGLE_LIQUIDITY) return false;
+    if (opp.pair2Volume < MIN_TRIANGLE_LIQUIDITY) return false;
+    if (opp.pair3Volume < MIN_TRIANGLE_LIQUIDITY) return false;
     return true;
   });
   
   if (filtered.length === 0) {
-    await sendMessage(chatId, `🔺 <b>Triangular Arbitrage</b>\nНайдено: ${opportunities.length} | После фильтрации: 0`, mainKeyboard);
+    await sendMessage(chatId, `🔺 <b>Triangular Arbitrage</b>\nНайдено: ${opportunities.length} | После фильтрации: 0\n\n💡 Мин. объём каждой пары: $500K`, mainKeyboard);
     return;
   }
   
@@ -1278,7 +1305,7 @@ async function showTriangularResults(chatId, opportunities, f) {
     text += `${i+1}. ${emoji} <b>${opp.path}</b>\n`;
     text += `   💱 ${opp.exchange}: +${opp.profitPercent.toFixed(2)}%\n`;
     text += `   💵 $${opp.startAmount.toFixed(0)} → $${opp.endAmount.toFixed(2)}\n`;
-    text += `   📊 Объём: $${(opp.volume24h/1000).toFixed(0)}K\n\n`;
+    text += `   📊 Объём: $${(opp.pair1Volume/1000).toFixed(0)}K / $${(opp.pair2Volume/1000).toFixed(0)}K / $${(opp.pair3Volume/1000).toFixed(0)}K\n\n`;
   }
   
   await sendMessage(chatId, text, mainKeyboard);
