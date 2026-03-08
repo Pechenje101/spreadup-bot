@@ -1511,6 +1511,11 @@ export default async function handler(req, res) {
           maxSpread: MAX_SPREAD_PERCENT,
           minVolume: 500000,
           exchangeStats: priceCache.exchangeStats,
+          // Debug info
+          debugTri: {
+            firstTri: triangularOpps[0] || null,
+            cached: priceCache.triangularOpps?.length || 0
+          },
           timestamp: new Date().toISOString()
         });
       } catch (e) {
