@@ -586,6 +586,40 @@ function findTriangularOpportunities(allPairs, exchange) {
     pairMap[pair] = allPairs[pair];
   }
   
+  // SIMPLE TEST: Just check BTC->ETH->USDT triangle
+  const btcUsdt = pairMap['BTCUSDT'];
+  const ethBtc = pairMap['ETHBTC'];
+  const ethUsdt = pairMap['ETHUSDT'];
+  
+  console.log(`[TRI][${exchange}] TEST: BTCUSDT=${btcUsdt?.price}, ETHBTC=${ethBtc?.price}, ETHUSDT=${ethUsdt?.price}`);
+  
+  if (btcUsdt && ethBtc && ethUsdt) {
+    const startAmount = 1000;
+    const btcAmount = startAmount / btcUsdt.price;
+    const ethAmount = btcAmount * (1 / ethBtc.price);  // 1 ETH = ethBtc BTC, so 1 BTC = 1/ethBtc ETH
+    const endAmount = ethAmount * ethUsdt.price;
+    const profit = ((endAmount - startAmount) / startAmount) * 100;
+    
+    console.log(`[TRI][${exchange}] TEST CALC: ${startAmount} USDT -> ${btcAmount.toFixed(6)} BTC -> ${ethAmount.toFixed(6)} ETH -> ${endAmount.toFixed(2)} USDT = ${profit.toFixed(4)}%`);
+    
+    // Add this as an opportunity
+    opportunities.push({
+      type: 'triangular',
+      exchange,
+      path: `USDT → BTC → ETH → USDT`,
+      midAsset: 'BTC',
+      finalAsset: 'ETH',
+      startAmount,
+      endAmount,
+      profitPercent: profit,
+      pair1Volume: btcUsdt.volume,
+      pair2Volume: ethBtc.volume,
+      pair3Volume: ethUsdt.volume,
+      volume24h: Math.max(btcUsdt.volume, ethBtc.volume, ethUsdt.volume),
+      steps: []
+    });
+  }
+  
   // Find all possible triangles starting from USDT
   for (const midAsset of ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX', 'MATIC', 'LINK']) {
     // Triangle: USDT -> midAsset -> finalAsset -> USDT
