@@ -137,6 +137,7 @@ async function fetchMEXCPrices() {
       }
     }
     
+    console.log(`MEXC: ${Object.keys(spot).length} spot, ${Object.keys(allPairs).length} allPairs`);
     return { spot, futures, volumes, funding, allPairs, exchange: 'MEXC' };
   } catch (e) {
     console.error('MEXC error:', e.message);
@@ -181,6 +182,7 @@ async function fetchGateIOPrices() {
       }
     }
     
+    console.log(`Gate.io: ${Object.keys(spot).length} spot, ${Object.keys(allPairs).length} allPairs`);
     return { spot, futures, volumes, funding, allPairs, exchange: 'Gate.io' };
   } catch (e) {
     console.error('Gate.io error:', e.message);
