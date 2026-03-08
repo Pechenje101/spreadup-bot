@@ -676,9 +676,8 @@ function findTriangularOpportunities(allPairs, exchange) {
         console.log(`[TRI] BTC->ETH: start=${startAmount}, mid=${midAmount}, final=${finalAmount}, end=${endAmount}, profit=${profitPercent}%`);
       }
       
-      // Filter: only show profitable triangles
-      // Note: triangular arb typically has very small profits (0.01-0.5%)
-      if (profitPercent > 0.01 && profitPercent <= MAX_SPREAD_PERCENT) {
+      // Filter: show ALL triangles for debugging
+      if (profitPercent > 0 && profitPercent <= MAX_SPREAD_PERCENT) {
         opportunities.push({
           type: 'triangular',
           exchange,
@@ -1329,13 +1328,9 @@ async function showFairPriceResults(chatId, opportunities, f) {
 }
 
 async function showTriangularResults(chatId, opportunities, f) {
-  // Filter by enabled exchanges and min spread
+  // Filter by enabled exchanges (no min spread for now)
   const filtered = opportunities.filter(opp => {
-    if (opp.profitPercent < f.minSpread) return false;
     if (!f.enabledExchanges.includes(opp.exchange)) return false;
-    // USDT pairs must have minimum liquidity
-    if (opp.pair1Volume < MIN_TRIANGLE_LIQUIDITY) return false;
-    if (opp.pair3Volume < MIN_TRIANGLE_LIQUIDITY) return false;
     return true;
   });
   
