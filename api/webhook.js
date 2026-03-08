@@ -961,10 +961,18 @@ async function scanAllExchanges() {
   // === 5. Triangular Arbitrage Opportunities ===
   const triangularOpps = [];
   
+  console.log(`[TRI] Checking ${TRIANGLE_EXCHANGES.length} exchanges for triangles...`);
+  
   for (const exchange of TRIANGLE_EXCHANGES) {
-    if (allExchangePairs[exchange]) {
-      const triangles = findTriangularOpportunities(allExchangePairs[exchange], exchange);
+    const pairs = allExchangePairs[exchange];
+    if (pairs) {
+      const pairCount = Object.keys(pairs).length;
+      console.log(`[TRI] ${exchange}: ${pairCount} pairs available`);
+      const triangles = findTriangularOpportunities(pairs, exchange);
+      console.log(`[TRI] ${exchange}: found ${triangles.length} triangles`);
       triangularOpps.push(...triangles);
+    } else {
+      console.log(`[TRI] ${exchange}: NO PAIRS DATA`);
     }
   }
   
