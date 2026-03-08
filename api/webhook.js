@@ -636,9 +636,8 @@ function findTriangularOpportunities(allPairs, exchange) {
       
       // ===== LIQUIDITY CHECK =====
       // For USDT pairs (pair1, pair3): require 500K volume
-      // For cross-pairs (pair2): require only 50K (they naturally have less volume)
+      // For cross-pairs (pair2): No minimum (they naturally have very low volume)
       const MIN_USDT_PAIR_LIQUIDITY = MIN_TRIANGLE_LIQUIDITY;  // 500K
-      const MIN_CROSS_PAIR_LIQUIDITY = 50000;  // 50K for non-USDT pairs
       
       const pair1Volume = pairMap[pair1]?.volume || pairMap[pair1Alt]?.volume || 0;
       const pair3Volume = pairMap[pair3]?.volume || pairMap[pair3Alt]?.volume || 0;
@@ -647,8 +646,7 @@ function findTriangularOpportunities(allPairs, exchange) {
       if (pair1Volume < MIN_USDT_PAIR_LIQUIDITY) continue;
       if (pair3Volume < MIN_USDT_PAIR_LIQUIDITY) continue;
       
-      // For cross-pair, require lower threshold
-      if (pair2Volume < MIN_CROSS_PAIR_LIQUIDITY) continue;
+      // For cross-pair, accept any volume (even 0)
       
       // Calculate triangle profit
       // Start with 1000 USDT
@@ -1313,10 +1311,9 @@ async function showTriangularResults(chatId, opportunities, f) {
     if (opp.profitPercent < f.minSpread) return false;
     if (f.minVolume > 0 && opp.volume24h < f.minVolume) return false;
     if (!f.enabledExchanges.includes(opp.exchange)) return false;
-    // Additional check: all pairs must have minimum liquidity
-    // pair1 and pair3 are USDT pairs (need 500K), pair2 is cross-pair (need 50K)
+    // Additional check: USDT pairs must have minimum liquidity
+    // pair1 and pair3 are USDT pairs (need 500K), pair2 is cross-pair (no minimum)
     if (opp.pair1Volume < MIN_TRIANGLE_LIQUIDITY) return false;
-    if (opp.pair2Volume < 50000) return false;  // Cross-pair needs less
     if (opp.pair3Volume < MIN_TRIANGLE_LIQUIDITY) return false;
     return true;
   });
