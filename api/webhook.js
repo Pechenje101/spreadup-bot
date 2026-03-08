@@ -1293,8 +1293,9 @@ async function showTriangularResults(chatId, opportunities, f) {
     if (f.minVolume > 0 && opp.volume24h < f.minVolume) return false;
     if (!f.enabledExchanges.includes(opp.exchange)) return false;
     // Additional check: all pairs must have minimum liquidity
+    // pair1 and pair3 are USDT pairs (need 500K), pair2 is cross-pair (need 50K)
     if (opp.pair1Volume < MIN_TRIANGLE_LIQUIDITY) return false;
-    if (opp.pair2Volume < MIN_TRIANGLE_LIQUIDITY) return false;
+    if (opp.pair2Volume < 50000) return false;  // Cross-pair needs less
     if (opp.pair3Volume < MIN_TRIANGLE_LIQUIDITY) return false;
     return true;
   });
