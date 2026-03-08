@@ -21,6 +21,9 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 // MAX SPREAD LOCK - Filter out unrealistic spreads (likely junk tokens)
 const MAX_SPREAD_PERCENT = 20;
 
+// MIN LIQUIDITY for triangular arbitrage - Each pair must have ≥ 500K USDT volume
+const MIN_TRIANGLE_LIQUIDITY = 500000;
+
 // Global cache
 let priceCache = {
   spot: {},
@@ -602,6 +605,15 @@ function findTriangularOpportunities(allPairs, exchange) {
       
       const finalPriceUSDT = pairMap[pair3]?.price || (pairMap[pair3Alt] ? 1 / pairMap[pair3Alt].price : 0);
       if (finalPriceUSDT <= 0) continue;
+      
+      // ===== LIQUIDITY CHECK - All 3 pairs must have ≥ 500K volume =====
+      const pair1Volume = pairMap[pair1]?.volume || pairMap[pair1Alt]?.volume || 0;
+      const pair3Volume = pairMap[pair3]?.volume || pairMap[pair3Alt]?.volume || 0;
+      
+      // Skip if ANY pair has insufficient liquidity
+      if (pair1Volume < MIN_TRIANGLE_LIQUIDITY) continue;
+      if (pair2Volume < MIN_TRIANGLE_LIQUIDITY) continue;
+      if (pair3Volume < MIN_TRIANGLE_LIQUIDITY) continue;
       
       // Calculate triangle profit
       // Start with 1000 USDT
