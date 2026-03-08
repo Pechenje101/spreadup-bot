@@ -586,40 +586,6 @@ function findTriangularOpportunities(allPairs, exchange) {
     pairMap[pair] = allPairs[pair];
   }
   
-  // SIMPLE TEST: Just check BTC->ETH->USDT triangle
-  const btcUsdt = pairMap['BTCUSDT'];
-  const ethBtc = pairMap['ETHBTC'];
-  const ethUsdt = pairMap['ETHUSDT'];
-  
-  console.log(`[TRI][${exchange}] TEST: BTCUSDT=${btcUsdt?.price}, ETHBTC=${ethBtc?.price}, ETHUSDT=${ethUsdt?.price}`);
-  
-  if (btcUsdt && ethBtc && ethUsdt) {
-    const startAmount = 1000;
-    const btcAmount = startAmount / btcUsdt.price;
-    const ethAmount = btcAmount * (1 / ethBtc.price);  // 1 ETH = ethBtc BTC, so 1 BTC = 1/ethBtc ETH
-    const endAmount = ethAmount * ethUsdt.price;
-    const profit = ((endAmount - startAmount) / startAmount) * 100;
-    
-    console.log(`[TRI][${exchange}] TEST CALC: ${startAmount} USDT -> ${btcAmount.toFixed(6)} BTC -> ${ethAmount.toFixed(6)} ETH -> ${endAmount.toFixed(2)} USDT = ${profit.toFixed(4)}%`);
-    
-    // Add this as an opportunity
-    opportunities.push({
-      type: 'triangular',
-      exchange,
-      path: `USDT → BTC → ETH → USDT`,
-      midAsset: 'BTC',
-      finalAsset: 'ETH',
-      startAmount,
-      endAmount,
-      profitPercent: profit,
-      pair1Volume: btcUsdt.volume,
-      pair2Volume: ethBtc.volume,
-      pair3Volume: ethUsdt.volume,
-      volume24h: Math.max(btcUsdt.volume, ethBtc.volume, ethUsdt.volume),
-      steps: []
-    });
-  }
-  
   // Find all possible triangles starting from USDT
   for (const midAsset of ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX', 'MATIC', 'LINK']) {
     // Triangle: USDT -> midAsset -> finalAsset -> USDT
@@ -704,14 +670,8 @@ function findTriangularOpportunities(allPairs, exchange) {
       // Calculate profit percentage
       const profitPercent = ((endAmount - startAmount) / startAmount) * 100;
       
-      // Debug first triangle calculation for BTC
-      if (midAsset === 'BTC' && exchange === 'MEXC' && finalAsset === 'ETH') {
-        console.log(`[TRI] BTC->ETH triangle: midPrice=${midPriceUSDT}, pair2Price=${pair2Price}, finalPrice=${finalPriceUSDT}`);
-        console.log(`[TRI] BTC->ETH: start=${startAmount}, mid=${midAmount}, final=${finalAmount}, end=${endAmount}, profit=${profitPercent}%`);
-      }
-      
-      // Filter: show ALL triangles for debugging
-      if (profitPercent > 0 && profitPercent <= MAX_SPREAD_PERCENT) {
+      // Filter: only profitable triangles within max spread
+      if (profitPercent > 0.05 && profitPercent <= MAX_SPREAD_PERCENT) {
         opportunities.push({
           type: 'triangular',
           exchange,
@@ -1007,28 +967,11 @@ async function scanAllExchanges() {
   // === 5. Triangular Arbitrage Opportunities ===
   const triangularOpps = [];
   
-  console.log(`[TRI] Checking ${TRIANGLE_EXCHANGES.length} exchanges for triangles...`);
-  console.log(`[TRI] allExchangePairs keys: ${Object.keys(allExchangePairs).join(', ')}`);
-  
   for (const exchange of TRIANGLE_EXCHANGES) {
     const pairs = allExchangePairs[exchange];
     if (pairs) {
-      const pairCount = Object.keys(pairs).length;
-      const samplePairs = Object.keys(pairs).slice(0, 5).join(', ');
-      console.log(`[TRI] ${exchange}: ${pairCount} pairs available. Sample: ${samplePairs}`);
-      
-      // Test: check if BTCUSDT exists
-      if (pairs['BTCUSDT']) {
-        console.log(`[TRI] ${exchange}: BTCUSDT found, price=${pairs['BTCUSDT'].price}, vol=${pairs['BTCUSDT'].volume}`);
-      } else {
-        console.log(`[TRI] ${exchange}: BTCUSDT NOT FOUND`);
-      }
-      
       const triangles = findTriangularOpportunities(pairs, exchange);
-      console.log(`[TRI] ${exchange}: found ${triangles.length} triangles`);
       triangularOpps.push(...triangles);
-    } else {
-      console.log(`[TRI] ${exchange}: NO PAIRS DATA`);
     }
   }
   
@@ -1511,11 +1454,6 @@ export default async function handler(req, res) {
           maxSpread: MAX_SPREAD_PERCENT,
           minVolume: 500000,
           exchangeStats: priceCache.exchangeStats,
-          // Debug info
-          debugTri: {
-            firstTri: triangularOpps[0] || null,
-            cached: priceCache.triangularOpps?.length || 0
-          },
           timestamp: new Date().toISOString()
         });
       } catch (e) {
