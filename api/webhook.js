@@ -1123,7 +1123,7 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v6.0 для арбитража криптовалют.\n\n` +
+      `Я SpreadUP Bot v7.0 для арбитража криптовалют.\n\n` +
       `📊 <b>5 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
@@ -1145,7 +1145,7 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v6.0</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v7.0</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
@@ -1165,7 +1165,7 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v6.0</b>\n`;
+  let text = `📊 <b>Статус v7.0</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
