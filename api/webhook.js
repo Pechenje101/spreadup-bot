@@ -1,18 +1,18 @@
 /**
- * SpreadUP Bot v6.0 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v7.0 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
  * 2. Futures-Futures - Cross-exchange futures arbitrage
  * 3. Funding Rate - Funding rate arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
- * 5. Triangular Arbitrage - Intra-exchange triangle arb
+ * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
  * 
  * Exchanges: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
  * 
  * Filters:
  * - Max spread 20% to filter out junk/scam tokens
- * - Min volume 500K USDT by default
+ * - Min volume 500K USDT for USDT pairs
  */
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8476184475:AAEka7mj2waSrH1XV4z-PWwuMFxwTVVsbHg';
@@ -1463,7 +1463,7 @@ export default async function handler(req, res) {
     
     return res.status(200).json({
       status: 'SpreadUP Bot Active',
-      version: '6.0.0',
+      version: '7.0.0',
       modes: ['spot-futures', 'futures-futures', 'funding-rate', 'fair-price', 'triangular'],
       exchanges: ALL_EXCHANGES,
       maxSpread: MAX_SPREAD_PERCENT,
