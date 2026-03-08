@@ -592,6 +592,12 @@ function findTriangularOpportunities(allPairs, exchange) {
     const pair1 = midAsset + 'USDT';  // Buy midAsset with USDT
     const pair1Alt = 'USDT' + midAsset; // Alternative naming
     
+    // Debug: log first midAsset
+    if (midAsset === 'BTC') {
+      console.log(`[TRI][${exchange}] Checking midAsset=${midAsset}`);
+      console.log(`[TRI][${exchange}] pair1=${pair1}, exists=${!!pairMap[pair1]}, price=${pairMap[pair1]?.price}`);
+    }
+    
     if (!pairMap[pair1] && !pairMap[pair1Alt]) continue;
     
     // Get midAsset price in USDT
