@@ -569,6 +569,12 @@ function findTriangularOpportunities(allPairs, exchange) {
   const opportunities = [];
   const pairs = Object.keys(allPairs);
   
+  // Debug counters
+  let totalTriangles = 0;
+  let filteredByWhitelist = 0;
+  let filteredByLiquidity = 0;
+  let filteredByProfit = 0;
+  
   // Common quote currencies for triangles
   const quotes = ['USDT', 'BTC', 'ETH', 'USDC', 'BNB'];
   
@@ -685,6 +691,11 @@ function findTriangularOpportunities(allPairs, exchange) {
   
   // Sort by profit
   opportunities.sort((a, b) => b.profitPercent - a.profitPercent);
+  
+  // Debug output
+  if (opportunities.length > 0 || totalTriangles > 0) {
+    console.log(`[${exchange}] Triangles: ${opportunities.length} found | Total checked: ${totalTriangles} | Whitelist filter: ${filteredByWhitelist} | Liquidity filter: ${filteredByLiquidity} | Profit filter: ${filteredByProfit}`);
+  }
   
   return opportunities;
 }
