@@ -626,14 +626,21 @@ function findTriangularOpportunities(allPairs, exchange) {
       const finalPriceUSDT = pairMap[pair3]?.price || (pairMap[pair3Alt] ? 1 / pairMap[pair3Alt].price : 0);
       if (finalPriceUSDT <= 0) continue;
       
-      // ===== LIQUIDITY CHECK - All 3 pairs must have ≥ 500K volume =====
+      // ===== LIQUIDITY CHECK =====
+      // For USDT pairs (pair1, pair3): require 500K volume
+      // For cross-pairs (pair2): require only 50K (they naturally have less volume)
+      const MIN_USDT_PAIR_LIQUIDITY = MIN_TRIANGLE_LIQUIDITY;  // 500K
+      const MIN_CROSS_PAIR_LIQUIDITY = 50000;  // 50K for non-USDT pairs
+      
       const pair1Volume = pairMap[pair1]?.volume || pairMap[pair1Alt]?.volume || 0;
       const pair3Volume = pairMap[pair3]?.volume || pairMap[pair3Alt]?.volume || 0;
       
-      // Skip if ANY pair has insufficient liquidity
-      if (pair1Volume < MIN_TRIANGLE_LIQUIDITY) continue;
-      if (pair2Volume < MIN_TRIANGLE_LIQUIDITY) continue;
-      if (pair3Volume < MIN_TRIANGLE_LIQUIDITY) continue;
+      // Skip if USDT pairs have insufficient liquidity
+      if (pair1Volume < MIN_USDT_PAIR_LIQUIDITY) continue;
+      if (pair3Volume < MIN_USDT_PAIR_LIQUIDITY) continue;
+      
+      // For cross-pair, require lower threshold
+      if (pair2Volume < MIN_CROSS_PAIR_LIQUIDITY) continue;
       
       // Calculate triangle profit
       // Start with 1000 USDT
