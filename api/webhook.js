@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v7.0 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v7.1 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -403,7 +403,9 @@ async function fetchHTXPrices() {
         if (data.status === 'ok' && data.tick) {
           const symbol = sym.toUpperCase();
           const price = parseFloat(data.tick.close);
-          const vol = parseFloat(data.tick.vol) || 0;
+          // vol is base currency amount, need to multiply by price for USDT volume
+          const baseVol = parseFloat(data.tick.vol) || 0;
+          const vol = baseVol * price; // Convert to quote currency (USDT)
           
           if (price > 0) {
             // Normalize symbol format
@@ -460,7 +462,8 @@ async function fetchLbankPrices() {
           
           if (price > 0 && base.length >= 2 && base.length <= 10) {
             spot[symbol] = price;
-            volumes[symbol] = 0;
+            // Lbank doesn't provide volume in this endpoint, skip for volume filtering
+            // volumes[symbol] = 0; // Don't add - will use max from other exchanges
             allPairs[symbol] = { price, volume: 0 };
           }
         }
@@ -1123,7 +1126,7 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v7.0 для арбитража криптовалют.\n\n` +
+      `Я SpreadUP Bot v7.1 для арбитража криптовалют.\n\n` +
       `📊 <b>5 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
@@ -1145,7 +1148,7 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v7.0</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v7.1</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
@@ -1165,7 +1168,7 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v7.0</b>\n`;
+  let text = `📊 <b>Статус v7.1</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
@@ -1215,7 +1218,8 @@ async function showSpotFuturesResults(chatId, opportunities, f) {
   for (let i = 0; i < Math.min(5, filtered.length); i++) {
     const opp = filtered[i];
     const emoji = opp.spreadPercent >= 3 ? '🔥' : opp.spreadPercent >= 1 ? '⚡' : '📊';
-    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(2)}%\n`;
+    const volStr = opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`;
+    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(2)}% | 📊 ${volStr}\n`;
     text += `   ${opp.spotExchange} ($${formatPrice(opp.spotPrice)}) → ${opp.futuresExchange} ($${formatPrice(opp.futuresPrice)})\n\n`;
   }
   
@@ -1241,7 +1245,8 @@ async function showFuturesFuturesResults(chatId, opportunities, f) {
   for (let i = 0; i < Math.min(6, filtered.length); i++) {
     const opp = filtered[i];
     const emoji = opp.spreadPercent >= 1 ? '🔥' : opp.spreadPercent >= 0.5 ? '⚡' : '📊';
-    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(3)}%\n`;
+    const volStr = opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`;
+    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(3)}% | 📊 ${volStr}\n`;
     text += `   📥 ${opp.buyExchange}: $${formatPrice(opp.lowPrice)}\n`;
     text += `   📤 ${opp.sellExchange}: $${formatPrice(opp.highPrice)}\n\n`;
   }
@@ -1268,7 +1273,8 @@ async function showFundingRateResults(chatId, opportunities, f) {
   for (let i = 0; i < Math.min(8, filtered.length); i++) {
     const opp = filtered[i];
     const emoji = opp.dailyProfitPercent >= 1 ? '🔥' : opp.dailyProfitPercent >= 0.5 ? '⚡' : '📊';
-    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: +${opp.dailyProfitPercent.toFixed(2)}%/день\n`;
+    const volStr = opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`;
+    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: +${opp.dailyProfitPercent.toFixed(2)}%/день | 📊 ${volStr}\n`;
     text += `   📈 ${opp.longExchange} (${(opp.longRate * 100).toFixed(4)}%)\n`;
     text += `   📉 ${opp.shortExchange} (${(opp.shortRate * 100).toFixed(4)}%)\n\n`;
   }
@@ -1295,7 +1301,8 @@ async function showFairPriceResults(chatId, opportunities, f) {
   for (let i = 0; i < Math.min(6, filtered.length); i++) {
     const opp = filtered[i];
     const emoji = opp.spreadPercent >= 3 ? '🔥' : opp.spreadPercent >= 1 ? '⚡' : '📊';
-    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(2)}%\n`;
+    const volStr = opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`;
+    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b>: ${opp.spreadPercent.toFixed(2)}% | 📊 ${volStr}\n`;
     text += `   💵 Fair: $${formatPrice(opp.fairPrice)}\n`;
     text += `   🟢 ${opp.undervaluedExchange}: ${opp.undervaluedDeviation.toFixed(2)}%\n`;
     text += `   🔴 ${opp.overvaluedExchange}: +${opp.overvaluedDeviation.toFixed(2)}%\n\n`;
