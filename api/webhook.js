@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v9.0 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v10.0 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -7,7 +7,7 @@
  * 3. Funding Rate - Funding rate arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
  * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
- *    v9.0: Added 4 DEX exchanges (Uniswap, PancakeSwap, Raydium, Orca)
+ *    v10.0: Added 4 DEX exchanges (Uniswap, PancakeSwap, Raydium, Orca)
  * 
  * Exchanges: 14 total
  * - CEX: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
@@ -959,6 +959,192 @@ function findTriangularOpportunities(allPairs, exchange) {
   return uniqueOpps;
 }
 
+// ========== Cross-Exchange Triangular Arbitrage ==========
+
+/**
+ * Find cross-exchange triangular arbitrage opportunities.
+ * Each step of the triangle uses the BEST price across ALL exchanges.
+ * 
+ * Example: USDT -> BTC (buy on MEXC) -> ETH (trade on Bybit) -> USDT (sell on OKX)
+ * 
+ * Prerequisites: User has balances on multiple exchanges
+ */
+function findCrossExchangeTriangles(allSpot, allVolumes) {
+  const opportunities = [];
+  const MIN_VOLUME = 500000; // 500K minimum
+  
+  // Get all exchanges that have prices
+  const allExchanges = new Set();
+  for (const symbol in allSpot) {
+    for (const ex in allSpot[symbol]) {
+      allExchanges.add(ex);
+    }
+  }
+  
+  // Helper to find best price across exchanges
+  function findBestPrice(symbol, direction) {
+    const prices = allSpot[symbol];
+    if (!prices) return null;
+    
+    let bestEx = null;
+    let bestPrice = direction === 'buy' ? Infinity : -Infinity;
+    
+    for (const ex in prices) {
+      const price = prices[ex];
+      const vol = allVolumes[symbol] || MIN_VOLUME;
+      
+      if (price > 0 && vol >= MIN_VOLUME) {
+        if (direction === 'buy' && price < bestPrice) {
+          bestPrice = price;
+          bestEx = ex;
+        } else if (direction === 'sell' && price > bestPrice) {
+          bestPrice = price;
+          bestEx = ex;
+        }
+      }
+    }
+    
+    return bestEx ? { exchange: bestEx, price: bestPrice, volume: allVolumes[symbol] || 0 } : null;
+  }
+  
+  // Helper to get price on specific exchange
+  function getPriceOnExchange(symbol, exchange) {
+    const prices = allSpot[symbol];
+    if (!prices || !prices[exchange]) return null;
+    return { price: prices[exchange], volume: allVolumes[symbol] || 0 };
+  }
+  
+  // Build triangle paths
+  // USDT -> midAsset -> finalAsset -> USDT
+  for (const midAsset of MID_ASSETS) {
+    if (midAsset === 'USDT' || midAsset === 'USDC') continue;
+    
+    const pair1 = midAsset + 'USDT'; // Buy midAsset with USDT
+    
+    // Find best exchange to BUY midAsset (lowest price)
+    const buyMidResult = findBestPrice(pair1, 'buy');
+    if (!buyMidResult) continue;
+    
+    // Find all assets that have pairs with midAsset
+    for (const finalAsset of MID_ASSETS) {
+      if (finalAsset === midAsset || finalAsset === 'USDT' || finalAsset === 'USDC') continue;
+      
+      // Check cross-pair: midAsset/finalAsset
+      const crossPairDirect = midAsset + finalAsset;
+      const crossPairInverse = finalAsset + midAsset;
+      
+      let crossPair = null;
+      let crossPrice = 0;
+      let crossEx = null;
+      let crossDirection = 'direct'; // direct = midAsset/finalAsset, inverse = finalAsset/midAsset
+      
+      // Try to find cross-pair on any exchange
+      for (const ex of allExchanges) {
+        const direct = getPriceOnExchange(crossPairDirect, ex);
+        const inverse = getPriceOnExchange(crossPairInverse, ex);
+        
+        if (direct && direct.price > 0) {
+          crossPair = crossPairDirect;
+          crossPrice = direct.price;
+          crossEx = ex;
+          crossDirection = 'direct';
+          break;
+        } else if (inverse && inverse.price > 0) {
+          crossPair = crossPairInverse;
+          crossPrice = 1 / inverse.price; // Invert
+          crossEx = ex;
+          crossDirection = 'inverse';
+          break;
+        }
+      }
+      
+      if (!crossPair || crossPrice <= 0) continue;
+      
+      const pair3 = finalAsset + 'USDT'; // Sell finalAsset for USDT
+      
+      // Find best exchange to SELL finalAsset (highest price)
+      const sellFinalResult = findBestPrice(pair3, 'sell');
+      if (!sellFinalResult) continue;
+      
+      // Calculate cross-exchange triangle profit
+      const startAmount = 1000;
+      const fee1 = EXCHANGE_FEES[buyMidResult.exchange] || 0.002;
+      const fee2 = EXCHANGE_FEES[crossEx] || 0.002;
+      const fee3 = EXCHANGE_FEES[sellFinalResult.exchange] || 0.002;
+      const totalFees = fee1 + fee2 + fee3;
+      
+      // Step 1: Buy midAsset with USDT (on buyMidResult.exchange)
+      const midAmount = (startAmount / buyMidResult.price) * (1 - fee1);
+      
+      // Step 2: Trade midAsset for finalAsset (on crossEx)
+      const finalAmount = (midAmount * crossPrice) * (1 - fee2);
+      
+      // Step 3: Sell finalAsset for USDT (on sellFinalResult.exchange)
+      const endAmount = (finalAmount * sellFinalResult.price) * (1 - fee3);
+      
+      const profitPercent = ((endAmount - startAmount) / startAmount) * 100;
+      
+      // Filter: profit > 0.05% and realistic
+      if (profitPercent > 0.1 && profitPercent <= MAX_SPREAD_PERCENT) {
+        opportunities.push({
+          type: 'cross-exchange-triangle',
+          path: `USDT → ${midAsset} → ${finalAsset} → USDT`,
+          midAsset,
+          finalAsset,
+          startAmount,
+          endAmount,
+          profitPercent,
+          totalFees: totalFees * 100,
+          steps: [
+            {
+              action: 'BUY',
+              asset: midAsset,
+              pair: pair1,
+              exchange: buyMidResult.exchange,
+              price: buyMidResult.price,
+              volume: buyMidResult.volume
+            },
+            {
+              action: 'TRADE',
+              from: midAsset,
+              to: finalAsset,
+              pair: crossPair,
+              exchange: crossEx,
+              price: crossPrice,
+              direction: crossDirection
+            },
+            {
+              action: 'SELL',
+              asset: finalAsset,
+              pair: pair3,
+              exchange: sellFinalResult.exchange,
+              price: sellFinalResult.price,
+              volume: sellFinalResult.volume
+            }
+          ],
+          exchanges: [buyMidResult.exchange, crossEx, sellFinalResult.exchange],
+          volume24h: Math.min(buyMidResult.volume, sellFinalResult.volume)
+        });
+      }
+    }
+  }
+  
+  // Remove duplicates and sort
+  const seen = new Set();
+  const uniqueOpps = opportunities.filter(opp => {
+    const key = opp.path + '|' + opp.exchanges.sort().join(',');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  
+  uniqueOpps.sort((a, b) => b.profitPercent - a.profitPercent);
+  
+  console.log(`Cross-Exchange Triangles: ${uniqueOpps.length} found`);
+  
+  return uniqueOpps.slice(0, 50); // Top 50
+}
+
 // ========== Scanning ==========
 
 async function scanAllExchanges() {
@@ -1236,6 +1422,10 @@ async function scanAllExchanges() {
   // Sort by profit and take top opportunities
   triangularOpps.sort((a, b) => b.profitPercent - a.profitPercent);
   
+  // === 6. Cross-Exchange Triangular Arbitrage ===
+  // Find triangles where each step uses the best price across all exchanges
+  const crossExchangeOpps = findCrossExchangeTriangles(allSpot, allVolumes);
+  
   // Update cache
   priceCache.spot = allSpot;
   priceCache.futures = allFutures;
@@ -1247,6 +1437,7 @@ async function scanAllExchanges() {
   priceCache.fundingOpps = fundingOpps;
   priceCache.fairPriceOpps = fairPriceOpps;
   priceCache.triangularOpps = triangularOpps;
+  priceCache.crossExchangeOpps = crossExchangeOpps;
   priceCache.exchangeStats = exchangeStats;
   priceCache.lastUpdate = new Date();
   
@@ -1319,6 +1510,7 @@ const getModeKb = (currentMode) => ({
     [{ text: `${currentMode === 'funding-rate' ? '✅ ' : ''}💰 Funding Rate`, callback_data: 'set_mode_funding-rate' }],
     [{ text: `${currentMode === 'fair-price' ? '✅ ' : ''}⚖️ Price vs Fair`, callback_data: 'set_mode_fair-price' }],
     [{ text: `${currentMode === 'triangular' ? '✅ ' : ''}🔺 Triangular Arb`, callback_data: 'set_mode_triangular' }],
+    [{ text: `${currentMode === 'cross-exchange' ? '✅ ' : ''}🌐 Cross-Exchange Triangle`, callback_data: 'set_mode_cross-exchange' }],
     [{ text: '🔙 Назад', callback_data: 'filters' }]
   ]
 });
@@ -1381,7 +1573,7 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v9.0 для арбитража криптовалют.\n\n` +
+      `Я SpreadUP Bot v10.0 для арбитража криптовалют.\n\n` +
       `📊 <b>5 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
@@ -1403,7 +1595,7 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v9.0</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v10.0</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
@@ -1423,7 +1615,7 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v9.0</b>\n`;
+  let text = `📊 <b>Статус v10.0</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
@@ -1444,13 +1636,14 @@ async function handleStatus(chatId) {
 
 async function handleScan(chatId) {
   await sendMessage(chatId, '🔄 <b>Сканирование...</b>');
-  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps } = await scanAllExchanges();
+  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, crossExchangeOpps } = await scanAllExchanges();
   const f = getFilters(chatId);
   
   if (f.mode === 'spot-futures') await showSpotFuturesResults(chatId, spotFuturesOpps, f);
   else if (f.mode === 'futures-futures') await showFuturesFuturesResults(chatId, futuresFuturesOpps, f);
   else if (f.mode === 'funding-rate') await showFundingRateResults(chatId, fundingOpps, f);
   else if (f.mode === 'fair-price') await showFairPriceResults(chatId, fairPriceOpps, f);
+  else if (f.mode === 'cross-exchange') await showCrossExchangeResults(chatId, crossExchangeOpps, f);
   else await showTriangularResults(chatId, triangularOpps, f);
 }
 
@@ -1597,6 +1790,44 @@ async function showTriangularResults(chatId, opportunities, f) {
   await sendMessage(chatId, text, mainKeyboard);
 }
 
+async function showCrossExchangeResults(chatId, opportunities, f) {
+  if (!opportunities || opportunities.length === 0) {
+    await sendMessage(chatId, `🌐 <b>Cross-Exchange Triangle</b>\n\nНайдено: 0 возможностей\n\n💡 Каждый шаг на лучшей бирже!\n💡 Требует балансов на нескольких биржах`, mainKeyboard);
+    return;
+  }
+  
+  // Filter by enabled exchanges
+  const filtered = opportunities.filter(opp => {
+    const exchanges = opp.exchanges || [];
+    return exchanges.some(ex => f.enabledExchanges.includes(ex));
+  });
+  
+  let text = `🌐 <b>Cross-Exchange Triangle</b>\nНайдено: ${opportunities.length} | Фильтр: ${filtered.length}\n💡 Каждый шаг на лучшей бирже по цене\n\n`;
+  
+  for (let i = 0; i < Math.min(10, filtered.length); i++) {
+    const opp = filtered[i];
+    const emoji = opp.profitPercent >= 1 ? '🔥' : opp.profitPercent >= 0.5 ? '⚡' : '📊';
+    const volStr = opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`;
+    
+    text += `${i+1}. ${emoji} <b>${opp.path}</b>\n`;
+    
+    // Show each step with exchange
+    if (opp.steps && opp.steps.length === 3) {
+      text += `   ① ${opp.steps[0].action} ${opp.steps[0].asset} @ ${opp.steps[0].exchange}\n`;
+      text += `   ② ${opp.steps[1].action} ${opp.steps[1].from}→${opp.steps[1].to} @ ${opp.steps[1].exchange}\n`;
+      text += `   ③ ${opp.steps[2].action} ${opp.steps[2].asset} @ ${opp.steps[2].exchange}\n`;
+    }
+    
+    text += `   💰 <b>+${opp.profitPercent.toFixed(3)}%</b>`;
+    if (opp.totalFees) {
+      text += ` (комиссии: ${opp.totalFees.toFixed(2)}%)`;
+    }
+    text += `\n   💵 $${opp.startAmount} → $${opp.endAmount.toFixed(2)} | 📊 ${volStr}\n\n`;
+  }
+  
+  await sendMessage(chatId, text, mainKeyboard);
+}
+
 async function handleTop(chatId) {
   const f = getFilters(chatId);
   if (priceCache.lastUpdate === null) {
@@ -1607,6 +1838,7 @@ async function handleTop(chatId) {
   else if (f.mode === 'futures-futures') await showFuturesFuturesResults(chatId, priceCache.futuresFuturesOpps, f);
   else if (f.mode === 'funding-rate') await showFundingRateResults(chatId, priceCache.fundingOpps, f);
   else if (f.mode === 'fair-price') await showFairPriceResults(chatId, priceCache.fairPriceOpps, f);
+  else if (f.mode === 'cross-exchange') await showCrossExchangeResults(chatId, priceCache.crossExchangeOpps || [], f);
   else await showTriangularResults(chatId, priceCache.triangularOpps, f);
 }
 
@@ -1630,6 +1862,7 @@ async function handleCallback(cb) {
   else if (data === 'set_mode_funding-rate') { f.mode = 'funding-rate'; await sendMessage(chatId, '✅ Funding Rate', getFiltersKb(f)); }
   else if (data === 'set_mode_fair-price') { f.mode = 'fair-price'; await sendMessage(chatId, '✅ Price vs Fair', getFiltersKb(f)); }
   else if (data === 'set_mode_triangular') { f.mode = 'triangular'; await sendMessage(chatId, '✅ Triangular Arbitrage', getFiltersKb(f)); }
+  else if (data === 'set_mode_cross-exchange') { f.mode = 'cross-exchange'; await sendMessage(chatId, '✅ Cross-Exchange Triangle', getFiltersKb(f)); }
   else if (data === 'filter_min_spread') await sendMessage(chatId, '📉 <b>Мин. спред</b>', getSpreadKb());
   else if (data === 'filter_funding_profit') await sendMessage(chatId, '💰 <b>Мин. прибыль</b>', getFundingProfitKb());
   else if (data === 'filter_min_volume') await sendMessage(chatId, '📊 <b>Мин. объём (USDT)</b>', getVolumeKb());
