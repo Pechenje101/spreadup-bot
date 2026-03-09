@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v8.1 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v8.2 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -7,13 +7,14 @@
  * 3. Funding Rate - Funding rate arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
  * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
- *    v8.1: FIXED price direction bug in step 2 calculations
+ *    v8.2: Filter dead pairs with 0 volume in cross-pairs
  * 
  * Exchanges: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
  * 
  * Filters:
  * - Max spread 20% to filter out junk/scam tokens
  * - Min volume 500K USDT for USDT pairs
+ * - Min volume 10K for cross-pairs (to filter dead pairs)
  * - Triangular: profit after fees
  */
 
@@ -688,6 +689,12 @@ function findTriangularOpportunities(allPairs, exchange) {
         step2Volume = step2.volume;
         step2Pair = step2.pair;
         
+        // Check volume for cross-pair (must have SOME trading activity)
+        // Cross-pairs naturally have lower volume, but > 0 is required
+        // Minimum 10K USDT equivalent to filter dead pairs
+        const MIN_CROSS_PAIR_VOLUME = 10000; // $10K minimum for cross-pairs
+        if (step2Volume < MIN_CROSS_PAIR_VOLUME) continue;
+        
         // Step 3: Get pair finalAsset/startCurrency
         const step3 = getPairInfo(finalAsset, startCurrency);
         if (!step3) continue;
@@ -753,6 +760,9 @@ function findTriangularOpportunities(allPairs, exchange) {
         // We need: "how much midAsset for 1 finalAsset" = getPairInfo(finalAsset, midAsset)
         const revStep2 = getPairInfo(finalAsset, midAsset);
         if (!revStep2) continue;
+        
+        // Check volume for cross-pair (same as main path)
+        if (revStep2.volume < MIN_CROSS_PAIR_VOLUME) continue;
         
         const revStep3 = getPairInfo(midAsset, startCurrency);
         if (!revStep3 || revStep3.volume < MIN_TRIANGLE_LIQUIDITY) continue;
@@ -1228,7 +1238,7 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v8.1 для арбитража криптовалют.\n\n` +
+      `Я SpreadUP Bot v8.2 для арбитража криптовалют.\n\n` +
       `📊 <b>5 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
@@ -1250,7 +1260,7 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v8.1</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v8.2</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
@@ -1270,7 +1280,7 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v8.1</b>\n`;
+  let text = `📊 <b>Статус v8.2</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
