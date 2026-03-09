@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v8.2 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v9.0 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -7,9 +7,11 @@
  * 3. Funding Rate - Funding rate arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
  * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
- *    v8.2: Filter dead pairs with 0 volume in cross-pairs
+ *    v9.0: Added 4 DEX exchanges (Uniswap, PancakeSwap, Raydium, Orca)
  * 
- * Exchanges: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
+ * Exchanges: 14 total
+ * - CEX: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
+ * - DEX: Uniswap, PancakeSwap, Raydium, Orca
  * 
  * Filters:
  * - Max spread 20% to filter out junk/scam tokens
@@ -64,12 +66,13 @@ const userFilters = {};
 const userSubscribed = {};
 const lastAlertTime = {};
 
-// All supported exchanges (10 total)
-const ALL_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Lbank', 'KuCoin', 'Jupiter'];
+// All supported exchanges (14 total - 9 CEX + 5 DEX)
+const ALL_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Lbank', 'KuCoin', 'Jupiter', 'Uniswap', 'PancakeSwap', 'Raydium', 'Orca'];
 const FUTURES_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
 
 // Exchanges that support triangular arbitrage (have many pairs)
-const TRIANGLE_EXCHANGES = ['MEXC', 'Gate.io', 'OKX', 'Bybit', 'Bitget', 'KuCoin'];
+// DEX exchanges work on specific chains - triangles must stay within same chain
+const TRIANGLE_EXCHANGES = ['MEXC', 'Gate.io', 'OKX', 'Bybit', 'Bitget', 'KuCoin', 'Raydium', 'Orca', 'Uniswap', 'PancakeSwap'];
 
 // ========== Telegram API ==========
 
@@ -571,10 +574,140 @@ async function fetchJupiterPrices() {
   }
 }
 
+// ========== DEX Exchange Fetchers ==========
+
+// Popular token addresses for different chains
+const DEX_TOKENS = {
+  // Solana tokens (for Raydium, Orca)
+  solana: [
+    { symbol: 'SOL', address: 'So11111111111111111111111111111111111111112' },
+    { symbol: 'BONK', address: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263' },
+    { symbol: 'WIF', address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm' },
+    { symbol: 'JUP', address: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN' },
+    { symbol: 'RAY', address: '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R' },
+    { symbol: 'ORCA', address: 'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE' },
+    { symbol: 'RENDER', address: 'rndrizKT3MK1iimdxRmWzYBfFW6E3kVvkdZ1uWgjThq' },
+    { symbol: 'POPCAT', address: '7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr' },
+    { symbol: 'PYTH', address: 'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3' },
+    { symbol: 'JITO', address: 'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn' }
+  ],
+  // Ethereum tokens (for Uniswap)
+  ethereum: [
+    { symbol: 'ETH', address: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2' },
+    { symbol: 'WBTC', address: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599' },
+    { symbol: 'USDC', address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48' },
+    { symbol: 'LINK', address: '0x514910771AF9Ca656af840dff83E8264EcF986CA' },
+    { symbol: 'UNI', address: '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984' },
+    { symbol: 'AAVE', address: '0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9' },
+    { symbol: 'PEPE', address: '0x6982508145454Ce325dDbE47a25d4ec3d2311933' },
+    { symbol: 'SHIB', address: '0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE' }
+  ],
+  // BSC tokens (for PancakeSwap)
+  bsc: [
+    { symbol: 'BNB', address: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c' },
+    { symbol: 'CAKE', address: '0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82' },
+    { symbol: 'BUSD', address: '0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56' },
+    { symbol: 'ETH', address: '0x2170Ed0880ac9A755fd29B2688956BD959F933F8' },
+    { symbol: 'BTCB', address: '0x7130d2A12B9BCbFAe4f2634d864A1Ee1Ce3Ead9c' }
+  ]
+};
+
+// Generic DEX fetcher using Dexscreener API
+async function fetchDEXPrices(dexName, chainId, tokens) {
+  const spot = {}, volumes = {}, allPairs = {};
+  
+  try {
+    const fetchPromises = tokens.map(async (token) => {
+      try {
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${token.address}`, {
+          signal: AbortSignal.timeout(15000)
+        });
+        const data = await res.json();
+        
+        if (data.pairs && data.pairs.length > 0) {
+          const bestPair = data.pairs
+            .filter(p => {
+              if (p.chainId !== chainId) return false;
+              const quote = p.quoteToken?.symbol;
+              return (quote === 'USDC' || quote === 'USDT' || quote === 'WETH' || quote === 'ETH' || quote === 'WBNB' || quote === 'BNB') && 
+                     (p.liquidity?.usd || 0) > 50000;
+            })
+            .sort((a, b) => (parseFloat(b.liquidity?.usd || 0)) - (parseFloat(a.liquidity?.usd || 0)))[0];
+          
+          if (bestPair && bestPair.priceUsd) {
+            const price = parseFloat(bestPair.priceUsd);
+            const vol = parseFloat(bestPair.volume?.h24 || 0);
+            if (price > 0 && vol > 0) {
+              const quoteSymbol = bestPair.quoteToken?.symbol === 'WETH' ? 'ETH' : 
+                                  bestPair.quoteToken?.symbol === 'WBNB' ? 'BNB' : 
+                                  bestPair.quoteToken?.symbol;
+              
+              return {
+                symbol: token.symbol + 'USDT',
+                price,
+                volume: vol,
+                crossPair: token.symbol + quoteSymbol,
+                crossPrice: parseFloat(bestPair.priceNative) || price,
+                crossVolume: vol
+              };
+            }
+          }
+        }
+      } catch (e) {}
+      return null;
+    });
+    
+    const results = await Promise.all(fetchPromises);
+    
+    for (const result of results) {
+      if (result) {
+        spot[result.symbol] = result.price;
+        volumes[result.symbol] = result.volume;
+        allPairs[result.symbol] = { price: result.price, volume: result.volume };
+        
+        if (result.crossPair && result.crossPair !== result.symbol) {
+          allPairs[result.crossPair] = { price: result.crossPrice, volume: result.crossVolume };
+        }
+      }
+    }
+    
+    if (chainId === 'ethereum' || chainId === 'solana') {
+      allPairs['USDCUSDT'] = { price: 1.0, volume: 10000000 };
+    }
+    
+    console.log(`${dexName}: ${Object.keys(spot).length} spot, ${Object.keys(allPairs).length} pairs`);
+    return { spot, futures: {}, volumes, funding: {}, allPairs, exchange: dexName };
+  } catch (e) {
+    console.error(`${dexName} error:`, e.message);
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: dexName };
+  }
+}
+
+// Raydium (Solana DEX)
+async function fetchRaydiumPrices() {
+  return fetchDEXPrices('Raydium', 'solana', DEX_TOKENS.solana);
+}
+
+// Orca (Solana DEX)
+async function fetchOrcaPrices() {
+  return fetchDEXPrices('Orca', 'solana', DEX_TOKENS.solana);
+}
+
+// Uniswap (Ethereum DEX)
+async function fetchUniswapPrices() {
+  return fetchDEXPrices('Uniswap', 'ethereum', DEX_TOKENS.ethereum);
+}
+
+// PancakeSwap (BSC DEX)
+async function fetchPancakeSwapPrices() {
+  return fetchDEXPrices('PancakeSwap', 'bsc', DEX_TOKENS.bsc);
+}
+
 // ========== Triangular Arbitrage Calculation ==========
 
 // Trading fees per exchange (taker fee for market orders)
 const EXCHANGE_FEES = {
+  // CEX fees
   'MEXC': 0.002,      // 0.2%
   'Gate.io': 0.002,   // 0.2%
   'Bybit': 0.001,     // 0.1%
@@ -584,7 +717,12 @@ const EXCHANGE_FEES = {
   'BingX': 0.001,     // 0.1%
   'HTX': 0.002,       // 0.2%
   'Lbank': 0.002,     // 0.2%
-  'Jupiter': 0.0003   // 0.03% (DEX)
+  // DEX fees (swap fees + gas estimated)
+  'Jupiter': 0.0003,     // 0.03% (Solana DEX aggregator)
+  'Raydium': 0.0025,     // 0.25% (Solana DEX)
+  'Orca': 0.002,         // 0.2% (Solana DEX)
+  'Uniswap': 0.003,      // 0.3% (Ethereum DEX + gas)
+  'PancakeSwap': 0.0025  // 0.25% (BSC DEX)
 };
 
 // Expanded list of intermediate assets for triangular arbitrage
@@ -836,7 +974,12 @@ async function scanAllExchanges() {
     fetchHTXPrices(),
     fetchLbankPrices(),
     fetchKuCoinPrices(),
-    fetchJupiterPrices()
+    fetchJupiterPrices(),
+    // New DEX fetchers
+    fetchRaydiumPrices(),
+    fetchOrcaPrices(),
+    fetchUniswapPrices(),
+    fetchPancakeSwapPrices()
   ]);
   
   const allSpot = {}, allFutures = {}, allVolumes = {}, allFunding = {}, allExchangePairs = {};
@@ -1238,7 +1381,7 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v8.2 для арбитража криптовалют.\n\n` +
+      `Я SpreadUP Bot v9.0 для арбитража криптовалют.\n\n` +
       `📊 <b>5 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
@@ -1260,7 +1403,7 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v8.2</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v9.0</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
@@ -1280,7 +1423,7 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v8.2</b>\n`;
+  let text = `📊 <b>Статус v9.0</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
