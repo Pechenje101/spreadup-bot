@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v7.1 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v8.0 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -7,12 +7,14 @@
  * 3. Funding Rate - Funding rate arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
  * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
+ *    v8.0: Expanded paths, exchange fees, reverse triangles, USDC support
  * 
  * Exchanges: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
  * 
  * Filters:
  * - Max spread 20% to filter out junk/scam tokens
  * - Min volume 500K USDT for USDT pairs
+ * - Triangular: profit after fees
  */
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8476184475:AAEka7mj2waSrH1XV4z-PWwuMFxwTVVsbHg';
@@ -570,143 +572,240 @@ async function fetchJupiterPrices() {
 
 // ========== Triangular Arbitrage Calculation ==========
 
+// Trading fees per exchange (taker fee for market orders)
+const EXCHANGE_FEES = {
+  'MEXC': 0.002,      // 0.2%
+  'Gate.io': 0.002,   // 0.2%
+  'Bybit': 0.001,     // 0.1%
+  'OKX': 0.001,       // 0.1%
+  'Bitget': 0.001,    // 0.1%
+  'KuCoin': 0.001,    // 0.1%
+  'BingX': 0.001,     // 0.1%
+  'HTX': 0.002,       // 0.2%
+  'Lbank': 0.002,     // 0.2%
+  'Jupiter': 0.0003   // 0.03% (DEX)
+};
+
+// Expanded list of intermediate assets for triangular arbitrage
+const MID_ASSETS = [
+  // Tier 1: Highest liquidity - Main trading pairs
+  'BTC', 'ETH', 'SOL', 'BNB', 'XRP',
+  // Tier 2: Stablecoins for cross-pair arbitrage
+  'USDC', 'DAI', 'TUSD',
+  // Tier 3: High-cap alts with good cross-pairs
+  'DOGE', 'ADA', 'AVAX', 'MATIC', 'LINK',
+  'DOT', 'UNI', 'ATOM', 'LTC', 'NEAR',
+  'ARB', 'OP', 'APT', 'SUI', 'INJ',
+  'FIL', 'AAVE', 'RUNE', 'FTM', 'ICP'
+];
+
+// Starting currencies for triangles
+const START_CURRENCIES = ['USDT', 'USDC'];
+
 function findTriangularOpportunities(allPairs, exchange) {
   const opportunities = [];
   const pairs = Object.keys(allPairs);
   
-  // Debug counters
-  let totalTriangles = 0;
-  let filteredByWhitelist = 0;
-  let filteredByLiquidity = 0;
-  let filteredByProfit = 0;
+  // Get exchange fee (3 trades in triangle)
+  const feePerTrade = EXCHANGE_FEES[exchange] || 0.002;
+  const totalFees = feePerTrade * 3; // Total fees for 3 trades
   
-  // Common quote currencies for triangles
-  const quotes = ['USDT', 'BTC', 'ETH', 'USDC', 'BNB'];
-  
-  // Build pair lookup
+  // Build pair lookup for fast access
   const pairMap = {};
   for (const pair of pairs) {
     pairMap[pair] = allPairs[pair];
   }
   
-  // Find all possible triangles starting from USDT
-  for (const midAsset of ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'DOGE', 'ADA', 'AVAX', 'MATIC', 'LINK']) {
-    // Triangle: USDT -> midAsset -> finalAsset -> USDT
-    const pair1 = midAsset + 'USDT';  // Buy midAsset with USDT
-    const pair1Alt = 'USDT' + midAsset; // Alternative naming
+  // Helper function to get pair price and volume
+  function getPairInfo(base, quote) {
+    // Try both orderings: BASEQUOTE and QUOTEBASE
+    const pair1 = base + quote;
+    const pair2 = quote + base;
     
-    // Debug: log first midAsset
-    if (midAsset === 'BTC') {
-      console.log(`[TRI][${exchange}] Checking midAsset=${midAsset}`);
-      console.log(`[TRI][${exchange}] pair1=${pair1}, exists=${!!pairMap[pair1]}, price=${pairMap[pair1]?.price}`);
+    if (pairMap[pair1]) {
+      return {
+        price: pairMap[pair1].price,
+        volume: pairMap[pair1].volume || 0,
+        pair: pair1,
+        inverted: false
+      };
     }
-    
-    if (!pairMap[pair1] && !pairMap[pair1Alt]) continue;
-    
-    // Get midAsset price in USDT
-    const midPriceUSDT = pairMap[pair1]?.price || (pairMap[pair1Alt] ? 1 / pairMap[pair1Alt].price : 0);
-    if (midPriceUSDT <= 0) continue;
-    
-    // Find all pairs with midAsset
-    for (const pair of pairs) {
-      let finalAsset = null;
-      let pair2Price = 0;
-      let pair2Volume = 0;
+    if (pairMap[pair2]) {
+      return {
+        price: 1 / pairMap[pair2].price, // Invert price
+        volume: pairMap[pair2].volume || 0,
+        pair: pair2,
+        inverted: true
+      };
+    }
+    return null;
+  }
+  
+  // ===== MAIN TRIANGLE LOGIC =====
+  // For each start currency (USDT, USDC)
+  for (const startCurrency of START_CURRENCIES) {
+    // For each intermediate asset
+    for (const midAsset of MID_ASSETS) {
+      if (midAsset === startCurrency) continue;
       
-      // Check if pair contains midAsset
-      if (pair.startsWith(midAsset) && pair !== pair1 && pair !== pair1Alt) {
-        // Pair is midAsset/Something (e.g., BTCETH)
-        finalAsset = pair.replace(midAsset, '');
-        if (finalAsset === 'USDT' || finalAsset === midAsset) continue;
-        pair2Price = pairMap[pair].price;
-        pair2Volume = pairMap[pair].volume || 0;
-      } else if (pair.endsWith(midAsset) && pair !== pair1 && pair !== pair1Alt) {
-        // Pair is Something/midAsset (e.g., ETHBTC)
-        finalAsset = pair.replace(midAsset, '');
-        if (finalAsset === 'USDT' || finalAsset === midAsset) continue;
-        pair2Price = 1 / pairMap[pair].price; // Inverse
-        pair2Volume = pairMap[pair].volume || 0;
-      }
-      
-      if (!finalAsset || finalAsset.length < 2 || finalAsset.length > 6) continue;
-      
-      // ===== WHITELIST CHECK - Only known liquid assets =====
+      // Skip if not in whitelist
       if (!LIQUID_ASSETS.has(midAsset)) continue;
-      if (!LIQUID_ASSETS.has(finalAsset)) continue;
       
-      // Check if we can sell finalAsset for USDT
-      const pair3 = finalAsset + 'USDT';
-      const pair3Alt = 'USDT' + finalAsset;
+      // Step 1: Get pair startCurrency/midAsset
+      const step1 = getPairInfo(midAsset, startCurrency);
+      if (!step1) continue;
       
-      if (!pairMap[pair3] && !pairMap[pair3Alt]) continue;
+      // Check volume for startCurrency pair
+      if (step1.volume < MIN_TRIANGLE_LIQUIDITY) continue;
       
-      const finalPriceUSDT = pairMap[pair3]?.price || (pairMap[pair3Alt] ? 1 / pairMap[pair3Alt].price : 0);
-      if (finalPriceUSDT <= 0) continue;
+      // Price to buy midAsset with startCurrency
+      const midPriceInStart = step1.price;
       
-      // ===== LIQUIDITY CHECK =====
-      // For USDT pairs (pair1, pair3): require 500K volume
-      // For cross-pairs (pair2): No minimum (they naturally have very low volume)
-      const MIN_USDT_PAIR_LIQUIDITY = MIN_TRIANGLE_LIQUIDITY;  // 500K
-      
-      const pair1Volume = pairMap[pair1]?.volume || pairMap[pair1Alt]?.volume || 0;
-      const pair3Volume = pairMap[pair3]?.volume || pairMap[pair3Alt]?.volume || 0;
-      
-      // Skip if USDT pairs have insufficient liquidity
-      if (pair1Volume < MIN_USDT_PAIR_LIQUIDITY) continue;
-      if (pair3Volume < MIN_USDT_PAIR_LIQUIDITY) continue;
-      
-      // For cross-pair, accept any volume (even 0)
-      
-      // Calculate triangle profit
-      // Start with 1000 USDT
-      const startAmount = 1000;
-      
-      // Step 1: Buy midAsset with USDT
-      const midAmount = startAmount / midPriceUSDT;
-      
-      // Step 2: Trade midAsset for finalAsset
-      const finalAmount = midAmount * pair2Price;
-      
-      // Step 3: Sell finalAsset for USDT
-      const endAmount = finalAmount * finalPriceUSDT;
-      
-      // Calculate profit percentage
-      const profitPercent = ((endAmount - startAmount) / startAmount) * 100;
-      
-      // Filter: only profitable triangles within max spread
-      if (profitPercent > 0.05 && profitPercent <= MAX_SPREAD_PERCENT) {
-        opportunities.push({
-          type: 'triangular',
-          exchange,
-          path: `USDT → ${midAsset} → ${finalAsset} → USDT`,
-          midAsset,
-          finalAsset,
-          startAmount,
-          endAmount,
-          profitPercent,
-          pair1Volume,
-          pair2Volume,
-          pair3Volume,
-          volume24h: Math.max(pair1Volume, pair2Volume, pair3Volume),
-          steps: [
-            { pair: pair1 || pair1Alt, action: 'buy', asset: midAsset, price: midPriceUSDT, volume: pair1Volume },
-            { pair: pair, action: 'trade', asset: finalAsset, price: pair2Price, volume: pair2Volume },
-            { pair: pair3 || pair3Alt, action: 'sell', asset: 'USDT', price: finalPriceUSDT, volume: pair3Volume }
-          ]
-        });
+      // Find all pairs with midAsset to form step 2
+      for (const pair of pairs) {
+        let finalAsset = null;
+        let step2Price = 0;
+        let step2Volume = 0;
+        let step2Pair = null;
+        
+        // Parse the pair to find the other asset
+        if (pair.startsWith(midAsset) && pair !== step1.pair) {
+          finalAsset = pair.replace(midAsset, '');
+        } else if (pair.endsWith(midAsset) && pair !== step1.pair) {
+          finalAsset = pair.replace(midAsset, '');
+        }
+        
+        // Validate finalAsset
+        if (!finalAsset || finalAsset === startCurrency || finalAsset === midAsset) continue;
+        if (finalAsset.length < 2 || finalAsset.length > 10) continue;
+        if (!LIQUID_ASSETS.has(finalAsset)) continue;
+        
+        // Get step 2 info (midAsset -> finalAsset)
+        const step2 = getPairInfo(finalAsset, midAsset);
+        if (!step2) continue;
+        step2Price = step2.price;
+        step2Volume = step2.volume;
+        step2Pair = step2.pair;
+        
+        // Step 3: Get pair finalAsset/startCurrency
+        const step3 = getPairInfo(finalAsset, startCurrency);
+        if (!step3) continue;
+        
+        // Check volume for final/startCurrency pair
+        if (step3.volume < MIN_TRIANGLE_LIQUIDITY) continue;
+        
+        const finalPriceInStart = step3.price;
+        
+        // ===== CALCULATE PROFIT =====
+        const startAmount = 1000; // $1000 starting
+        
+        // Step 1: Buy midAsset with startCurrency (apply fee)
+        const midAmount = (startAmount / midPriceInStart) * (1 - feePerTrade);
+        
+        // Step 2: Trade midAsset for finalAsset (apply fee)
+        const finalAmount = (midAmount * step2Price) * (1 - feePerTrade);
+        
+        // Step 3: Sell finalAsset for startCurrency (apply fee)
+        const endAmount = (finalAmount * finalPriceInStart) * (1 - feePerTrade);
+        
+        // Calculate profits
+        const grossProfitPercent = ((endAmount - startAmount) / startAmount) * 100;
+        const netProfitPercent = grossProfitPercent; // Fees already applied above
+        const feesPercent = totalFees * 100;
+        
+        // Filter: profit after fees > 0.05%, within max spread
+        if (netProfitPercent > 0.05 && netProfitPercent <= MAX_SPREAD_PERCENT) {
+          // Avoid duplicates
+          const pathKey = `${startCurrency}-${midAsset}-${finalAsset}-${startCurrency}`;
+          
+          opportunities.push({
+            type: 'triangular',
+            exchange,
+            startCurrency,
+            path: `${startCurrency} → ${midAsset} → ${finalAsset} → ${startCurrency}`,
+            midAsset,
+            finalAsset,
+            startAmount,
+            endAmount,
+            profitPercent: netProfitPercent,
+            grossProfitPercent,
+            feesPercent,
+            totalFees: totalFees * 100,
+            pair1Volume: step1.volume,
+            pair2Volume: step2Volume,
+            pair3Volume: step3.volume,
+            volume24h: Math.min(step1.volume, step3.volume), // Min of USDT pairs
+            steps: [
+              { pair: step1.pair, action: 'buy', asset: midAsset, price: midPriceInStart, volume: step1.volume },
+              { pair: step2Pair, action: 'trade', asset: finalAsset, price: step2Price, volume: step2Volume },
+              { pair: step3.pair, action: 'sell', asset: startCurrency, price: finalPriceInStart, volume: step3.volume }
+            ]
+          });
+        }
+        
+        // ===== REVERSE PATH =====
+        // Try reverse: startCurrency -> finalAsset -> midAsset -> startCurrency
+        const revStep1 = getPairInfo(finalAsset, startCurrency);
+        if (!revStep1 || revStep1.volume < MIN_TRIANGLE_LIQUIDITY) continue;
+        
+        const revStep2 = getPairInfo(midAsset, finalAsset);
+        if (!revStep2) continue;
+        
+        const revStep3 = getPairInfo(midAsset, startCurrency);
+        if (!revStep3 || revStep3.volume < MIN_TRIANGLE_LIQUIDITY) continue;
+        
+        // Calculate reverse profit
+        const revStartAmount = 1000;
+        const revMidAmount = (revStartAmount / revStep1.price) * (1 - feePerTrade);
+        const revFinalAmount = (revMidAmount * revStep2.price) * (1 - feePerTrade);
+        const revEndAmount = (revFinalAmount * revStep3.price) * (1 - feePerTrade);
+        
+        const revProfitPercent = ((revEndAmount - revStartAmount) / revStartAmount) * 100;
+        
+        if (revProfitPercent > 0.05 && revProfitPercent <= MAX_SPREAD_PERCENT) {
+          opportunities.push({
+            type: 'triangular',
+            exchange,
+            startCurrency,
+            path: `${startCurrency} → ${finalAsset} → ${midAsset} → ${startCurrency}`,
+            midAsset: finalAsset,
+            finalAsset: midAsset,
+            startAmount: revStartAmount,
+            endAmount: revEndAmount,
+            profitPercent: revProfitPercent,
+            grossProfitPercent: revProfitPercent,
+            feesPercent,
+            totalFees: totalFees * 100,
+            pair1Volume: revStep1.volume,
+            pair2Volume: revStep2.volume,
+            pair3Volume: revStep3.volume,
+            volume24h: Math.min(revStep1.volume, revStep3.volume),
+            steps: [
+              { pair: revStep1.pair, action: 'buy', asset: finalAsset, price: revStep1.price, volume: revStep1.volume },
+              { pair: revStep2.pair, action: 'trade', asset: midAsset, price: revStep2.price, volume: revStep2.volume },
+              { pair: revStep3.pair, action: 'sell', asset: startCurrency, price: revStep3.price, volume: revStep3.volume }
+            ]
+          });
+        }
       }
     }
   }
   
-  // Sort by profit
-  opportunities.sort((a, b) => b.profitPercent - a.profitPercent);
+  // Remove duplicates (same path, different discovery)
+  const seen = new Set();
+  const uniqueOpps = opportunities.filter(opp => {
+    const key = `${opp.exchange}-${opp.path}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   
-  // Debug output
-  if (opportunities.length > 0 || totalTriangles > 0) {
-    console.log(`[${exchange}] Triangles: ${opportunities.length} found | Total checked: ${totalTriangles} | Whitelist filter: ${filteredByWhitelist} | Liquidity filter: ${filteredByLiquidity} | Profit filter: ${filteredByProfit}`);
-  }
+  // Sort by net profit (after fees)
+  uniqueOpps.sort((a, b) => b.profitPercent - a.profitPercent);
   
-  return opportunities;
+  console.log(`[${exchange}] Triangles: ${uniqueOpps.length} found (fees: ${(totalFees*100).toFixed(2)}% x3)`);
+  
+  return uniqueOpps;
 }
 
 // ========== Scanning ==========
@@ -1126,7 +1225,7 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v7.1 для арбитража криптовалют.\n\n` +
+      `Я SpreadUP Bot v8.0 для арбитража криптовалют.\n\n` +
       `📊 <b>5 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
@@ -1148,7 +1247,7 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v7.1</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v8.0</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
@@ -1168,7 +1267,7 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v7.1</b>\n`;
+  let text = `📊 <b>Статус v8.0</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
@@ -1312,26 +1411,31 @@ async function showFairPriceResults(chatId, opportunities, f) {
 }
 
 async function showTriangularResults(chatId, opportunities, f) {
-  // Filter by enabled exchanges (no min spread for now)
+  // Filter by enabled exchanges
   const filtered = opportunities.filter(opp => {
     if (!f.enabledExchanges.includes(opp.exchange)) return false;
     return true;
   });
   
   if (filtered.length === 0) {
-    await sendMessage(chatId, `🔺 <b>Triangular Arbitrage</b>\nНайдено: ${opportunities.length} | После фильтрации: 0\n\n💡 Мин. объём каждой пары: $500K`, mainKeyboard);
+    await sendMessage(chatId, `🔺 <b>Triangular Arbitrage</b>\nНайдено: ${opportunities.length} | После фильтрации: 0\n\n💡 Мин. объём каждой пары: $500K\n💡 Прибыль уже за вычетом комиссий!`, mainKeyboard);
     return;
   }
   
-  let text = `🔺 <b>Triangular Arbitrage</b>\nНайдено: ${opportunities.length} | Фильтр: ${filtered.length}\n\n`;
+  let text = `🔺 <b>Triangular Arbitrage</b>\nНайдено: ${opportunities.length} | Фильтр: ${filtered.length}\n💡 Прибыль за вычетом комиссий\n\n`;
   
-  for (let i = 0; i < Math.min(8, filtered.length); i++) {
+  for (let i = 0; i < Math.min(10, filtered.length); i++) {
     const opp = filtered[i];
-    const emoji = opp.profitPercent >= 2 ? '🔥' : opp.profitPercent >= 1 ? '⚡' : '📊';
+    const emoji = opp.profitPercent >= 1 ? '🔥' : opp.profitPercent >= 0.5 ? '⚡' : '📊';
+    const volStr = opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`;
+    
     text += `${i+1}. ${emoji} <b>${opp.path}</b>\n`;
-    text += `   💱 ${opp.exchange}: +${opp.profitPercent.toFixed(2)}%\n`;
-    text += `   💵 $${opp.startAmount.toFixed(0)} → $${opp.endAmount.toFixed(2)}\n`;
-    text += `   📊 Объём: $${(opp.pair1Volume/1000).toFixed(0)}K / $${(opp.pair2Volume/1000).toFixed(0)}K / $${(opp.pair3Volume/1000).toFixed(0)}K\n\n`;
+    text += `   💱 ${opp.exchange}: <b>+${opp.profitPercent.toFixed(3)}%</b>`;
+    if (opp.totalFees) {
+      text += ` (комиссия: ${opp.totalFees.toFixed(2)}%)`;
+    }
+    text += `\n`;
+    text += `   💵 $${opp.startAmount.toFixed(0)} → $${opp.endAmount.toFixed(2)} | 📊 ${volStr}\n\n`;
   }
   
   await sendMessage(chatId, text, mainKeyboard);
