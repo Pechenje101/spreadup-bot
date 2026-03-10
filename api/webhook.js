@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v12.0 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v12.0.1 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
