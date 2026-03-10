@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v11.0 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v12.0 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -7,11 +7,12 @@
  * 3. Funding Rate - Funding rate arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
  * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
- *    v11.0: Added 4 DEX exchanges (Uniswap, PancakeSwap, Raydium, Orca)
+ * 6. Cross-Exchange Triangle - Each step on best-priced exchange
+ * 7. DEX-CEX Arbitrage - Price differences between DEX and CEX
  * 
- * Exchanges: 14 total
- * - CEX: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
- * - DEX: Uniswap, PancakeSwap, Raydium, Orca
+ * Exchanges: 16 total
+ * - CEX: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, WOO X, Deribit
+ * - DEX: Jupiter, Uniswap, PancakeSwap, Raydium, Orca
  * 
  * Filters:
  * - Max spread 20% to filter out junk/scam tokens
@@ -58,6 +59,7 @@ let priceCache = {
   fundingOpps: [],
   fairPriceOpps: [],
   triangularOpps: [],
+  dexCexOpps: [],
   exchangeStats: {}
 };
 
@@ -69,6 +71,10 @@ const lastAlertTime = {};
 // All supported exchanges (16 total - 11 CEX + 5 DEX)
 const ALL_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Lbank', 'KuCoin', 'WOO X', 'Deribit', 'Jupiter', 'Uniswap', 'PancakeSwap', 'Raydium', 'Orca'];
 const FUTURES_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'WOO X', 'Deribit'];
+
+// CEX and DEX separation for DEX-CEX arbitrage
+const CEX_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Lbank', 'KuCoin', 'WOO X', 'Deribit'];
+const DEX_EXCHANGES = ['Jupiter', 'Uniswap', 'PancakeSwap', 'Raydium', 'Orca'];
 
 // Exchanges that support triangular arbitrage (have many pairs)
 // DEX exchanges work on specific chains - triangles must stay within same chain
@@ -1240,6 +1246,146 @@ function findCrossExchangeTriangles(allSpot, allVolumes) {
   return uniqueOpps.slice(0, 50); // Top 50
 }
 
+// ========== DEX-CEX Arbitrage ==========
+
+/**
+ * Find arbitrage opportunities between DEX and CEX exchanges.
+ * 
+ * Strategy: Buy on the cheaper exchange (DEX or CEX), sell on the more expensive one.
+ * 
+ * Key considerations:
+ * - DEX fees are typically higher (swap fees + gas)
+ * - CEX fees are lower but require KYC and withdrawal limits
+ * - Need to account for slippage on DEX (especially for large amounts)
+ * 
+ * @param {Object} allSpot - All spot prices { symbol: { exchange: price } }
+ * @param {Object} allVolumes - Trading volumes { symbol: volume }
+ * @returns {Array} Array of DEX-CEX arbitrage opportunities
+ */
+function findDexCexOpportunities(allSpot, allVolumes) {
+  const opportunities = [];
+  const MIN_VOLUME = 100000; // $100K minimum for DEX-CEX (lower than CEX-CEX)
+  
+  // For each symbol that has both DEX and CEX prices
+  for (const symbol in allSpot) {
+    const prices = allSpot[symbol];
+    const volume = allVolumes[symbol] || 0;
+    
+    if (volume < MIN_VOLUME) continue;
+    
+    // Find best DEX price (lowest ask = best to buy)
+    let bestDexBuy = null, bestDexBuyPrice = Infinity;
+    let bestDexSell = null, bestDexSellPrice = 0;
+    
+    // Find best CEX price (lowest ask = best to buy)
+    let bestCexBuy = null, bestCexBuyPrice = Infinity;
+    let bestCexSell = null, bestCexSellPrice = 0;
+    
+    for (const ex of DEX_EXCHANGES) {
+      if (prices[ex] && prices[ex] > 0) {
+        // For buying, we want lowest price
+        if (prices[ex] < bestDexBuyPrice) {
+          bestDexBuyPrice = prices[ex];
+          bestDexBuy = ex;
+        }
+        // For selling, we want highest price
+        if (prices[ex] > bestDexSellPrice) {
+          bestDexSellPrice = prices[ex];
+          bestDexSell = ex;
+        }
+      }
+    }
+    
+    for (const ex of CEX_EXCHANGES) {
+      if (prices[ex] && prices[ex] > 0) {
+        // For buying, we want lowest price
+        if (prices[ex] < bestCexBuyPrice) {
+          bestCexBuyPrice = prices[ex];
+          bestCexBuy = ex;
+        }
+        // For selling, we want highest price
+        if (prices[ex] > bestCexSellPrice) {
+          bestCexSellPrice = prices[ex];
+          bestCexSell = ex;
+        }
+      }
+    }
+    
+    // Skip if no DEX or CEX prices
+    if (!bestDexBuy || !bestCexBuy) continue;
+    
+    // Calculate spreads
+    // Strategy 1: Buy on DEX, Sell on CEX
+    if (bestCexSellPrice > bestDexBuyPrice) {
+      const dexFee = EXCHANGE_FEES[bestDexBuy] || 0.003;
+      const cexFee = EXCHANGE_FEES[bestCexSell] || 0.002;
+      const totalFees = dexFee + cexFee;
+      
+      const grossSpread = ((bestCexSellPrice - bestDexBuyPrice) / bestDexBuyPrice) * 100;
+      const netSpread = grossSpread - (totalFees * 100);
+      
+      if (netSpread > 0.1 && grossSpread <= MAX_SPREAD_PERCENT) {
+        opportunities.push({
+          type: 'dex-cex',
+          symbol,
+          baseAsset: symbol.replace('USDT', ''),
+          direction: 'buy-dex-sell-cex',
+          buyExchange: bestDexBuy,
+          buyPrice: bestDexBuyPrice,
+          sellExchange: bestCexSell,
+          sellPrice: bestCexSellPrice,
+          spreadPercent: grossSpread,
+          netSpreadPercent: netSpread,
+          totalFees: totalFees * 100,
+          volume24h: volume,
+          buyUrl: getUrl(bestDexBuy, symbol, 'spot'),
+          sellUrl: getUrl(bestCexSell, symbol, 'spot'),
+          dexFee: dexFee * 100,
+          cexFee: cexFee * 100
+        });
+      }
+    }
+    
+    // Strategy 2: Buy on CEX, Sell on DEX
+    if (bestDexSellPrice > bestCexBuyPrice) {
+      const cexFee = EXCHANGE_FEES[bestCexBuy] || 0.002;
+      const dexFee = EXCHANGE_FEES[bestDexSell] || 0.003;
+      const totalFees = cexFee + dexFee;
+      
+      const grossSpread = ((bestDexSellPrice - bestCexBuyPrice) / bestCexBuyPrice) * 100;
+      const netSpread = grossSpread - (totalFees * 100);
+      
+      if (netSpread > 0.1 && grossSpread <= MAX_SPREAD_PERCENT) {
+        opportunities.push({
+          type: 'dex-cex',
+          symbol,
+          baseAsset: symbol.replace('USDT', ''),
+          direction: 'buy-cex-sell-dex',
+          buyExchange: bestCexBuy,
+          buyPrice: bestCexBuyPrice,
+          sellExchange: bestDexSell,
+          sellPrice: bestDexSellPrice,
+          spreadPercent: grossSpread,
+          netSpreadPercent: netSpread,
+          totalFees: totalFees * 100,
+          volume24h: volume,
+          buyUrl: getUrl(bestCexBuy, symbol, 'spot'),
+          sellUrl: getUrl(bestDexSell, symbol, 'spot'),
+          dexFee: dexFee * 100,
+          cexFee: cexFee * 100
+        });
+      }
+    }
+  }
+  
+  // Sort by net spread (after fees)
+  opportunities.sort((a, b) => b.netSpreadPercent - a.netSpreadPercent);
+  
+  console.log(`DEX-CEX Arbitrage: ${opportunities.length} found`);
+  
+  return opportunities.slice(0, 50); // Top 50
+}
+
 // ========== Scanning ==========
 
 async function scanAllExchanges() {
@@ -1523,6 +1669,10 @@ async function scanAllExchanges() {
   // Find triangles where each step uses the best price across all exchanges
   const crossExchangeOpps = findCrossExchangeTriangles(allSpot, allVolumes);
   
+  // === 7. DEX-CEX Arbitrage ===
+  // Find price differences between DEX and CEX
+  const dexCexOpps = findDexCexOpportunities(allSpot, allVolumes);
+  
   // Update cache
   priceCache.spot = allSpot;
   priceCache.futures = allFutures;
@@ -1535,12 +1685,13 @@ async function scanAllExchanges() {
   priceCache.fairPriceOpps = fairPriceOpps;
   priceCache.triangularOpps = triangularOpps;
   priceCache.crossExchangeOpps = crossExchangeOpps;
+  priceCache.dexCexOpps = dexCexOpps;
   priceCache.exchangeStats = exchangeStats;
   priceCache.lastUpdate = new Date();
   
-  console.log(`Found: ${spotFuturesOpps.length} spot-futures, ${futuresFuturesOpps.length} futures-futures, ${fundingOpps.length} funding, ${fairPriceOpps.length} fair-price, ${triangularOpps.length} triangular`);
+  console.log(`Found: ${spotFuturesOpps.length} spot-futures, ${futuresFuturesOpps.length} futures-futures, ${fundingOpps.length} funding, ${fairPriceOpps.length} fair-price, ${triangularOpps.length} triangular, ${dexCexOpps.length} dex-cex`);
   
-  return { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, exchangeStats };
+  return { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, dexCexOpps, exchangeStats };
 }
 
 function getUrl(exchange, symbol, type) {
@@ -1618,6 +1769,7 @@ const getModeKb = (currentMode) => ({
     [{ text: `${currentMode === 'fair-price' ? '✅ ' : ''}⚖️ Price vs Fair`, callback_data: 'set_mode_fair-price' }],
     [{ text: `${currentMode === 'triangular' ? '✅ ' : ''}🔺 Triangular Arb`, callback_data: 'set_mode_triangular' }],
     [{ text: `${currentMode === 'cross-exchange' ? '✅ ' : ''}🌐 Cross-Exchange Triangle`, callback_data: 'set_mode_cross-exchange' }],
+    [{ text: `${currentMode === 'dex-cex' ? '✅ ' : ''}🔀 DEX-CEX Arbitrage`, callback_data: 'set_mode_dex-cex' }],
     [{ text: '🔙 Назад', callback_data: 'filters' }]
   ]
 });
@@ -1664,7 +1816,9 @@ function getModeName(mode) {
     'futures-futures': '🔄 Futures-Futures', 
     'funding-rate': '💰 Funding Rate',
     'fair-price': '⚖️ Price vs Fair',
-    'triangular': '🔺 Triangular Arb'
+    'triangular': '🔺 Triangular Arb',
+    'cross-exchange': '🌐 Cross-Exchange',
+    'dex-cex': '🔀 DEX-CEX'
   }[mode] || mode;
 }
 
@@ -1680,14 +1834,16 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v11.0 для арбитража криптовалют.\n\n` +
-      `📊 <b>5 режимов работы:</b>\n` +
+      `Я SpreadUP Bot v12.0 для арбитража криптовалют.\n\n` +
+      `📊 <b>7 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
       `• 💰 <b>Funding Rate</b> - фандинг арбитраж\n` +
       `• ⚖️ <b>Price vs Fair</b> - отклонение от справедливой цены\n` +
-      `• 🔺 <b>Triangular Arb</b> - треугольный арбитраж\n\n` +
-      `💱 <b>10 бирж:</b> MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter\n\n` +
+      `• 🔺 <b>Triangular Arb</b> - треугольный арбитраж\n` +
+      `• 🌐 <b>Cross-Exchange</b> - межбиржевой треугольник\n` +
+      `• 🔀 <b>DEX-CEX</b> - арбитраж DEX ↔ CEX\n\n` +
+      `💱 <b>16 бирж:</b> 11 CEX + 5 DEX (Jupiter, Uniswap, PancakeSwap, Raydium, Orca)\n\n` +
       `🔒 <b>Фильтры:</b> спред ≤${MAX_SPREAD_PERCENT}% | объём ≥$500K\n\n` +
       `✅ Вы подписаны на уведомления!`,
       mainKeyboard
@@ -1702,13 +1858,15 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v11.0</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v12.0</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
       `💰 Funding Rate: Long низкий / Short высокий\n` +
       `⚖️ Price vs Fair: отклонение от справедливой цены\n` +
-      `🔺 Triangular: арбитраж внутри биржи (3 пары)\n\n` +
+      `🔺 Triangular: арбитраж внутри биржи (3 пары)\n` +
+      `🌐 Cross-Exchange: треугольник на лучших биржах\n` +
+      `🔀 DEX-CEX: арбитраж между DEX и CEX\n\n` +
       `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n` +
       `📊 Мин. объём: $500K\n\n` +
       `<b>Команды:</b>\n/start, /scan, /top, /filters, /status`,
@@ -1722,14 +1880,16 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v11.0</b>\n`;
+  let text = `📊 <b>Статус v12.0</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
   text += `🔄 Futures-Futures: ${priceCache.futuresFuturesOpps.length}\n`;
   text += `💰 Funding Rate: ${priceCache.fundingOpps.length}\n`;
   text += `⚖️ Price vs Fair: ${priceCache.fairPriceOpps.length}\n`;
-  text += `🔺 Triangular: ${priceCache.triangularOpps.length}\n\n`;
+  text += `🔺 Triangular: ${priceCache.triangularOpps.length}\n`;
+  text += `🌐 Cross-Exchange: ${(priceCache.crossExchangeOpps || []).length}\n`;
+  text += `🔀 DEX-CEX: ${(priceCache.dexCexOpps || []).length}\n\n`;
   
   if (priceCache.exchangeStats && Object.keys(priceCache.exchangeStats).length > 0) {
     text += `📊 <b>Биржи:</b>\n`;
@@ -1743,7 +1903,7 @@ async function handleStatus(chatId) {
 
 async function handleScan(chatId) {
   await sendMessage(chatId, '🔄 <b>Сканирование...</b>');
-  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, crossExchangeOpps } = await scanAllExchanges();
+  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, crossExchangeOpps, dexCexOpps } = await scanAllExchanges();
   const f = getFilters(chatId);
   
   if (f.mode === 'spot-futures') await showSpotFuturesResults(chatId, spotFuturesOpps, f);
@@ -1751,6 +1911,7 @@ async function handleScan(chatId) {
   else if (f.mode === 'funding-rate') await showFundingRateResults(chatId, fundingOpps, f);
   else if (f.mode === 'fair-price') await showFairPriceResults(chatId, fairPriceOpps, f);
   else if (f.mode === 'cross-exchange') await showCrossExchangeResults(chatId, crossExchangeOpps, f);
+  else if (f.mode === 'dex-cex') await showDexCexResults(chatId, dexCexOpps, f);
   else await showTriangularResults(chatId, triangularOpps, f);
 }
 
@@ -1935,6 +2096,39 @@ async function showCrossExchangeResults(chatId, opportunities, f) {
   await sendMessage(chatId, text, mainKeyboard);
 }
 
+async function showDexCexResults(chatId, opportunities, f) {
+  if (!opportunities || opportunities.length === 0) {
+    await sendMessage(chatId, `🔀 <b>DEX-CEX Arbitrage</b>\n\nНайдено: 0 возможностей\n\n💡 Арбитраж между DEX и CEX биржами\n💡 DEX: Jupiter, Uniswap, PancakeSwap, Raydium, Orca\n💡 CEX: MEXC, Gate.io, Bybit, OKX и др.`, mainKeyboard);
+    return;
+  }
+  
+  // Filter by enabled exchanges
+  const filtered = opportunities.filter(opp => {
+    if (!f.enabledExchanges.includes(opp.buyExchange)) return false;
+    if (!f.enabledExchanges.includes(opp.sellExchange)) return false;
+    return true;
+  });
+  
+  let text = `🔀 <b>DEX-CEX Arbitrage</b>\nНайдено: ${opportunities.length} | Фильтр: ${filtered.length}\n💡 Прибыль за вычетом комиссий\n\n`;
+  
+  for (let i = 0; i < Math.min(8, filtered.length); i++) {
+    const opp = filtered[i];
+    const emoji = opp.netSpreadPercent >= 1 ? '🔥' : opp.netSpreadPercent >= 0.5 ? '⚡' : '📊';
+    const volStr = opp.volume24h >= 1000000 ? `$${(opp.volume24h/1000000).toFixed(1)}M` : `$${(opp.volume24h/1000).toFixed(0)}K`;
+    const directionEmoji = opp.direction === 'buy-dex-sell-cex' ? '📤' : '📥';
+    const directionText = opp.direction === 'buy-dex-sell-cex' ? 'DEX→CEX' : 'CEX→DEX';
+    
+    text += `${i+1}. ${emoji} <b>${opp.baseAsset}</b> ${directionEmoji} ${directionText}\n`;
+    text += `   📥 ${opp.buyExchange}: $${formatPrice(opp.buyPrice)}\n`;
+    text += `   📤 ${opp.sellExchange}: $${formatPrice(opp.sellPrice)}\n`;
+    text += `   💰 <b>+${opp.netSpreadPercent.toFixed(3)}%</b> (спред: ${opp.spreadPercent.toFixed(2)}%)\n`;
+    text += `   💸 Комиссии: DEX ${opp.dexFee.toFixed(2)}% + CEX ${opp.cexFee.toFixed(2)}% = ${opp.totalFees.toFixed(2)}%\n`;
+    text += `   📊 Объём: ${volStr}\n\n`;
+  }
+  
+  await sendMessage(chatId, text, mainKeyboard);
+}
+
 async function handleTop(chatId) {
   const f = getFilters(chatId);
   if (priceCache.lastUpdate === null) {
@@ -1946,6 +2140,7 @@ async function handleTop(chatId) {
   else if (f.mode === 'funding-rate') await showFundingRateResults(chatId, priceCache.fundingOpps, f);
   else if (f.mode === 'fair-price') await showFairPriceResults(chatId, priceCache.fairPriceOpps, f);
   else if (f.mode === 'cross-exchange') await showCrossExchangeResults(chatId, priceCache.crossExchangeOpps || [], f);
+  else if (f.mode === 'dex-cex') await showDexCexResults(chatId, priceCache.dexCexOpps || [], f);
   else await showTriangularResults(chatId, priceCache.triangularOpps, f);
 }
 
@@ -1970,6 +2165,7 @@ async function handleCallback(cb) {
   else if (data === 'set_mode_fair-price') { f.mode = 'fair-price'; await sendMessage(chatId, '✅ Price vs Fair', getFiltersKb(f)); }
   else if (data === 'set_mode_triangular') { f.mode = 'triangular'; await sendMessage(chatId, '✅ Triangular Arbitrage', getFiltersKb(f)); }
   else if (data === 'set_mode_cross-exchange') { f.mode = 'cross-exchange'; await sendMessage(chatId, '✅ Cross-Exchange Triangle', getFiltersKb(f)); }
+  else if (data === 'set_mode_dex-cex') { f.mode = 'dex-cex'; await sendMessage(chatId, '✅ DEX-CEX Arbitrage', getFiltersKb(f)); }
   else if (data === 'filter_min_spread') await sendMessage(chatId, '📉 <b>Мин. спред</b>', getSpreadKb());
   else if (data === 'filter_funding_profit') await sendMessage(chatId, '💰 <b>Мин. прибыль</b>', getFundingProfitKb());
   else if (data === 'filter_min_volume') await sendMessage(chatId, '📊 <b>Мин. объём (USDT)</b>', getVolumeKb());
@@ -2049,7 +2245,7 @@ export default async function handler(req, res) {
     
     if (cron === 'scan') {
       try {
-        const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps } = await scanAllExchanges();
+        const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, dexCexOpps } = await scanAllExchanges();
         await sendAlerts(spotFuturesOpps, futuresFuturesOpps, fundingOpps);
         return res.status(200).json({ 
           status: 'scanned',
@@ -2058,6 +2254,7 @@ export default async function handler(req, res) {
           fundingRate: fundingOpps.length,
           fairPrice: fairPriceOpps.length,
           triangular: triangularOpps.length,
+          dexCex: (dexCexOpps || []).length,
           maxSpread: MAX_SPREAD_PERCENT,
           minVolume: 500000,
           exchangeStats: priceCache.exchangeStats,
@@ -2070,9 +2267,11 @@ export default async function handler(req, res) {
     
     return res.status(200).json({
       status: 'SpreadUP Bot Active',
-      version: '7.0.0',
-      modes: ['spot-futures', 'futures-futures', 'funding-rate', 'fair-price', 'triangular'],
+      version: '12.0.0',
+      modes: ['spot-futures', 'futures-futures', 'funding-rate', 'fair-price', 'triangular', 'cross-exchange', 'dex-cex'],
       exchanges: ALL_EXCHANGES,
+      cexExchanges: CEX_EXCHANGES,
+      dexExchanges: DEX_EXCHANGES,
       maxSpread: MAX_SPREAD_PERCENT,
       minVolume: 500000,
       spotFuturesOpps: priceCache.opportunities.length,
@@ -2080,6 +2279,8 @@ export default async function handler(req, res) {
       fundingOpps: priceCache.fundingOpps.length,
       fairPriceOpps: priceCache.fairPriceOpps.length,
       triangularOpps: priceCache.triangularOpps.length,
+      crossExchangeOpps: (priceCache.crossExchangeOpps || []).length,
+      dexCexOpps: (priceCache.dexCexOpps || []).length,
       exchangeStats: priceCache.exchangeStats
     });
   }
