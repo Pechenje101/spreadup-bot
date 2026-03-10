@@ -1,8 +1,11 @@
 {
   "name": "spreadup-bot",
-  "version": "1.0.0",
-  "description": "SpreadUP Telegram Bot",
+  "version": "12.1.0",
+  "description": "SpreadUP Telegram Bot - DEX-CEX Arbitrage",
   "main": "api/webhook.js",
+  "scripts": {
+    "start": "node api/webhook.js"
+  },
   "dependencies": {
     "node-fetch": "^2.7.0"
   }
