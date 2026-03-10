@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v10.0 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v10.1 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -7,7 +7,7 @@
  * 3. Funding Rate - Funding rate arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
  * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
- *    v10.0: Added 4 DEX exchanges (Uniswap, PancakeSwap, Raydium, Orca)
+ *    v10.1: Added 4 DEX exchanges (Uniswap, PancakeSwap, Raydium, Orca)
  * 
  * Exchanges: 14 total
  * - CEX: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
@@ -1447,10 +1447,11 @@ async function scanAllExchanges() {
 }
 
 function getUrl(exchange, symbol, type) {
-  const base = symbol.replace('USDT', '');
+  const base = symbol.replace('USDT', '').replace('USDC', '');
   const isSpot = type === 'spot';
   
   const urls = {
+    // CEX
     'MEXC': isSpot ? `https://www.mexc.com/exchange/${symbol}` : `https://www.mexc.com/futures/${base}USDT`,
     'Gate.io': isSpot ? `https://www.gate.io/trade/${base}_USDT` : `https://www.gate.io/futures_trade/USDT/${base}_USDT`,
     'BingX': isSpot ? `https://bingx.com/en-us/spot/${base}-USDT` : `https://bingx.com/en-us/futures/${base}-USDT`,
@@ -1460,7 +1461,14 @@ function getUrl(exchange, symbol, type) {
     'HTX': `https://www.htx.com/trade/${base}-usdt`,
     'Lbank': `https://www.lbank.com/trade/${base}_usdt`,
     'KuCoin': `https://www.kucoin.com/trade/${base}-USDT`,
-    'Jupiter': `https://jup.ag/swap/${base}-USDC`
+    // DEX - Solana
+    'Jupiter': `https://jup.ag/swap/${base}-USDC`,
+    'Raydium': `https://raydium.io/swap/?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=${base}`,
+    'Orca': `https://www.orca.so/?tokenIn=USDC&tokenOut=${base}`,
+    // DEX - Ethereum
+    'Uniswap': `https://app.uniswap.org/#/swap?outputCurrency=${base}`,
+    // DEX - BSC
+    'PancakeSwap': `https://pancakeswap.finance/swap?outputCurrency=${base}`
   };
   
   return urls[exchange] || '#';
@@ -1573,7 +1581,7 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v10.0 для арбитража криптовалют.\n\n` +
+      `Я SpreadUP Bot v10.1 для арбитража криптовалют.\n\n` +
       `📊 <b>5 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
@@ -1595,7 +1603,7 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v10.0</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v10.1</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
@@ -1615,7 +1623,7 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v10.0</b>\n`;
+  let text = `📊 <b>Статус v10.1</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
