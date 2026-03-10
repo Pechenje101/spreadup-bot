@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v12.0.1 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v12.1 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -2293,3 +2293,6 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true, error: e.message });
   }
 }
+
+// v12.1 - DEX-CEX Arbitrage Mode Added
+// Support for 16 exchanges: 11 CEX + 5 DEX
