@@ -1,9 +1,13 @@
 {
   "version": 2,
+  "name": "spreadup-bot",
   "functions": {
     "api/webhook.js": {
       "memory": 1024,
       "maxDuration": 60
     }
-  }
+  },
+  "routes": [
+    { "src": "/api/webhook", "dest": "/api/webhook" }
+  ]
 }
