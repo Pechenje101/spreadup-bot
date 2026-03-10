@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v10.1 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v11.0 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -7,7 +7,7 @@
  * 3. Funding Rate - Funding rate arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
  * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
- *    v10.1: Added 4 DEX exchanges (Uniswap, PancakeSwap, Raydium, Orca)
+ *    v11.0: Added 4 DEX exchanges (Uniswap, PancakeSwap, Raydium, Orca)
  * 
  * Exchanges: 14 total
  * - CEX: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, Jupiter
@@ -66,13 +66,13 @@ const userFilters = {};
 const userSubscribed = {};
 const lastAlertTime = {};
 
-// All supported exchanges (14 total - 9 CEX + 5 DEX)
-const ALL_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Lbank', 'KuCoin', 'Jupiter', 'Uniswap', 'PancakeSwap', 'Raydium', 'Orca'];
-const FUTURES_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget'];
+// All supported exchanges (16 total - 11 CEX + 5 DEX)
+const ALL_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Lbank', 'KuCoin', 'WOO X', 'Deribit', 'Jupiter', 'Uniswap', 'PancakeSwap', 'Raydium', 'Orca'];
+const FUTURES_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'WOO X', 'Deribit'];
 
 // Exchanges that support triangular arbitrage (have many pairs)
 // DEX exchanges work on specific chains - triangles must stay within same chain
-const TRIANGLE_EXCHANGES = ['MEXC', 'Gate.io', 'OKX', 'Bybit', 'Bitget', 'KuCoin', 'Raydium', 'Orca', 'Uniswap', 'PancakeSwap'];
+const TRIANGLE_EXCHANGES = ['MEXC', 'Gate.io', 'OKX', 'Bybit', 'Bitget', 'KuCoin', 'WOO X', 'Raydium', 'Orca', 'Uniswap', 'PancakeSwap'];
 
 // ========== Telegram API ==========
 
@@ -521,6 +521,99 @@ async function fetchKuCoinPrices() {
   }
 }
 
+// WOO X - CEX with low fees
+async function fetchWOOXPrices() {
+  try {
+    const spot = {}, futures = {}, volumes = {}, funding = {}, allPairs = {};
+    
+    // Fetch spot tickers
+    const spotRes = await fetch('https://api.woo.org/v1/public/ticker');
+    const spotData = await spotRes.json();
+    
+    if (spotData.data && spotData.data.rows) {
+      for (const item of spotData.data.rows) {
+        const symbol = item.symbol;
+        if (!symbol.endsWith('USDT')) continue;
+        
+        const price = parseFloat(item.last);
+        const vol = parseFloat(item.quote_volume) || 0;
+        
+        if (price > 0) {
+          spot[symbol] = price;
+          volumes[symbol] = vol;
+          allPairs[symbol] = { price, volume: vol };
+        }
+      }
+    }
+    
+    // Fetch futures tickers
+    try {
+      const futuresRes = await fetch('https://api.woo.org/v1/public/futures/ticker');
+      const futuresData = await futuresRes.json();
+      
+      if (futuresData.data && futuresData.data.rows) {
+        for (const item of futuresData.data.rows) {
+          const symbol = item.symbol;
+          if (!symbol.endsWith('USDT')) continue;
+          
+          const price = parseFloat(item.last);
+          if (price > 0) {
+            futures[symbol] = price;
+            funding[symbol] = parseFloat(item.funding_rate) || 0;
+          }
+        }
+      }
+    } catch (fe) {
+      console.error('WOO X futures error:', fe.message);
+    }
+    
+    console.log(`WOO X: ${Object.keys(spot).length} spot, ${Object.keys(futures).length} futures`);
+    return { spot, futures, volumes, funding, allPairs, exchange: 'WOO X' };
+  } catch (e) {
+    console.error('WOO X error:', e.message);
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'WOO X' };
+  }
+}
+
+// Deribit - Derivatives exchange (BTC, ETH focused)
+async function fetchDeribitPrices() {
+  try {
+    const futures = {}, funding = {}, volumes = {};
+    
+    // Deribit uses JSON-RPC 2.0
+    const currencies = ['BTC', 'ETH'];
+    
+    for (const currency of currencies) {
+      try {
+        // Fetch perpetual ticker
+        const res = await fetch('https://www.deribit.com/api/v2/public/ticker?instrument_name=' + currency + '-PERPETUAL');
+        const data = await res.json();
+        
+        if (data.result) {
+          const symbol = currency + 'USDT';
+          const price = data.result.last_price;
+          const vol = data.result.stats?.volume_usd || 0;
+          
+          if (price > 0) {
+            futures[symbol] = price;
+            volumes[symbol] = vol;
+            // Deribit funding is in the index price difference
+            funding[symbol] = 0; // Deribit has different funding mechanism
+          }
+        }
+      } catch (e) {
+        console.error(`Deribit ${currency} error:`, e.message);
+      }
+    }
+    
+    console.log(`Deribit: ${Object.keys(futures).length} futures`);
+    return { spot: {}, futures, volumes, funding, allPairs: {}, exchange: 'Deribit' };
+  } catch (e) {
+    console.error('Deribit error:', e.message);
+    return { spot: {}, futures: {}, volumes: {}, funding: {}, allPairs: {}, exchange: 'Deribit' };
+  }
+}
+
 // Jupiter (Solana DEX via Dexscreener)
 async function fetchJupiterPrices() {
   try {
@@ -717,6 +810,8 @@ const EXCHANGE_FEES = {
   'BingX': 0.001,     // 0.1%
   'HTX': 0.002,       // 0.2%
   'Lbank': 0.002,     // 0.2%
+  'WOO X': 0.001,     // 0.1% (low fee exchange)
+  'Deribit': 0.0005,  // 0.05% (derivatives specialist)
   // DEX fees (swap fees + gas estimated)
   'Jupiter': 0.0003,     // 0.03% (Solana DEX aggregator)
   'Raydium': 0.0025,     // 0.25% (Solana DEX)
@@ -1160,8 +1255,10 @@ async function scanAllExchanges() {
     fetchHTXPrices(),
     fetchLbankPrices(),
     fetchKuCoinPrices(),
+    fetchWOOXPrices(),
+    fetchDeribitPrices(),
+    // DEX fetchers
     fetchJupiterPrices(),
-    // New DEX fetchers
     fetchRaydiumPrices(),
     fetchOrcaPrices(),
     fetchUniswapPrices(),
@@ -1461,6 +1558,8 @@ function getUrl(exchange, symbol, type) {
     'HTX': `https://www.htx.com/trade/${base}-usdt`,
     'Lbank': `https://www.lbank.com/trade/${base}_usdt`,
     'KuCoin': `https://www.kucoin.com/trade/${base}-USDT`,
+    'WOO X': isSpot ? `https://x.woo.org/en/trade/spot/${base}-USDT` : `https://x.woo.org/en/trade/futures/${base}-USDT`,
+    'Deribit': `https://www.deribit.com/options/BTC/`,
     // DEX - Solana
     'Jupiter': `https://jup.ag/swap/${base}-USDC`,
     'Raydium': `https://raydium.io/swap/?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=${base}`,
@@ -1581,7 +1680,7 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v10.1 для арбитража криптовалют.\n\n` +
+      `Я SpreadUP Bot v11.0 для арбитража криптовалют.\n\n` +
       `📊 <b>5 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
@@ -1603,7 +1702,7 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v10.1</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v11.0</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
@@ -1623,7 +1722,7 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v10.1</b>\n`;
+  let text = `📊 <b>Статус v11.0</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
