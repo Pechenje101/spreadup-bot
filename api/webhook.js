@@ -1,5 +1,5 @@
 /**
- * SpreadUP Bot v12.1 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v13.0 - Multi-Mode Arbitrage Scanner
  * 
  * Modes:
  * 1. Spot-Futures - Spot to Futures arbitrage
@@ -9,6 +9,7 @@
  * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
  * 6. Cross-Exchange Triangle - Each step on best-priced exchange
  * 7. DEX-CEX Arbitrage - Price differences between DEX and CEX
+ * 8. Flash Loan Arb - Arbitrage using flash loans (no capital needed)
  * 
  * Exchanges: 16 total
  * - CEX: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, WOO X, Deribit
@@ -60,6 +61,7 @@ let priceCache = {
   fairPriceOpps: [],
   triangularOpps: [],
   dexCexOpps: [],
+  flashLoanOpps: [],
   exchangeStats: {}
 };
 
@@ -75,6 +77,85 @@ const FUTURES_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget',
 // CEX and DEX separation for DEX-CEX arbitrage
 const CEX_EXCHANGES = ['MEXC', 'Gate.io', 'BingX', 'Bybit', 'OKX', 'Bitget', 'HTX', 'Lbank', 'KuCoin', 'WOO X', 'Deribit'];
 const DEX_EXCHANGES = ['Jupiter', 'Uniswap', 'PancakeSwap', 'Raydium', 'Orca'];
+
+// ========== Flash Loan Providers ==========
+// Flash loan providers with their fees and supported chains
+const FLASH_LOAN_PROVIDERS = {
+  // Aave - Available on multiple chains
+  'Aave': {
+    chains: ['ethereum', 'arbitrum', 'optimism', 'base', 'polygon', 'avalanche'],
+    fee: 0.0009, // 0.09%
+    minLoan: 1000,
+    maxLoan: 100000000,
+    url: 'https://app.aave.com/flash-loan'
+  },
+  // dYdX - Ethereum only, but 0% fee!
+  'dYdX': {
+    chains: ['ethereum'],
+    fee: 0, // 0% - best option
+    minLoan: 1000,
+    maxLoan: 10000000,
+    url: 'https://dydx.exchange'
+  },
+  // Uniswap V3 Flash Swaps
+  'Uniswap V3': {
+    chains: ['ethereum', 'arbitrum', 'optimism', 'base', 'polygon'],
+    fee: 0, // 0% but need to provide liquidity
+    minLoan: 100,
+    maxLoan: 50000000,
+    url: 'https://app.uniswap.org'
+  },
+  // Solana Flash Loans - Marginfi
+  'Marginfi': {
+    chains: ['solana'],
+    fee: 0.001, // 0.1%
+    minLoan: 100,
+    maxLoan: 50000000,
+    url: 'https://app.marginfi.com'
+  },
+  // Solana - Solend
+  'Solend': {
+    chains: ['solana'],
+    fee: 0.0015, // 0.15%
+    minLoan: 100,
+    maxLoan: 25000000,
+    url: 'https://solend.fi'
+  },
+  // Kamino (Solana)
+  'Kamino': {
+    chains: ['solana'],
+    fee: 0.001, // 0.1%
+    minLoan: 100,
+    maxLoan: 50000000,
+    url: 'https://kamino.lending'
+  },
+  // Venus (BSC)
+  'Venus': {
+    chains: ['bsc'],
+    fee: 0.0009, // 0.09%
+    minLoan: 1000,
+    maxLoan: 50000000,
+    url: 'https://app.venus.io'
+  },
+  // PancakeSwap Flash Swaps (BSC)
+  'PancakeSwap Flash': {
+    chains: ['bsc'],
+    fee: 0, // 0%
+    minLoan: 100,
+    maxLoan: 50000000,
+    url: 'https://pancakeswap.finance'
+  }
+};
+
+// Chain to DEX mapping for flash loan arb
+const CHAIN_DEX = {
+  'solana': ['Jupiter', 'Raydium', 'Orca'],
+  'ethereum': ['Uniswap'],
+  'bsc': ['PancakeSwap'],
+  'arbitrum': ['Uniswap'],
+  'base': ['Uniswap'],
+  'polygon': ['Uniswap', 'PancakeSwap']
+};
 
 // Exchanges that support triangular arbitrage (have many pairs)
 // DEX exchanges work on specific chains - triangles must stay within same chain
@@ -1386,6 +1467,167 @@ function findDexCexOpportunities(allSpot, allVolumes) {
   return opportunities.slice(0, 50); // Top 50
 }
 
+// ========== Flash Loan Arbitrage ==========
+
+/**
+ * Find flash loan arbitrage opportunities.
+ * 
+ * Flash loans allow borrowing millions without collateral in a single transaction.
+ * Strategy: Borrow -> Arbitrage -> Repay loan + fees -> Keep profit
+ * 
+ * Key requirements:
+ * - All operations must happen in a SINGLE transaction/block
+ * - Profit must exceed flash loan fee + gas costs
+ * - Need smart contract to execute the arbitrage
+ * 
+ * @param {Object} allSpot - All spot prices { symbol: { exchange: price } }
+ * @param {Object} allVolumes - Trading volumes
+ * @returns {Array} Flash loan opportunities
+ */
+function findFlashLoanOpportunities(allSpot, allVolumes) {
+  const opportunities = [];
+  const MIN_PROFIT_PERCENT = 0.3; // Minimum 0.3% net profit after all fees
+  const LOAN_SIZES = [10000, 100000, 1000000, 10000000]; // $10K, $100K, $1M, $10M
+  
+  // DEX exchanges that can be used for flash loan arb (same-chain arbitrage)
+  const DEX_BY_CHAIN = {
+    'solana': ['Jupiter', 'Raydium', 'Orca'],
+    'ethereum': ['Uniswap'],
+    'bsc': ['PancakeSwap']
+  };
+  
+  // Flash loan providers by chain
+  const PROVIDERS_BY_CHAIN = {
+    'solana': ['Marginfi', 'Solend', 'Kamino'],
+    'ethereum': ['Aave', 'dYdX', 'Uniswap V3'],
+    'bsc': ['Venus', 'PancakeSwap Flash']
+  };
+  
+  // For each symbol, find price differences across DEXes on the same chain
+  for (const symbol in allSpot) {
+    const prices = allSpot[symbol];
+    const volume = allVolumes[symbol] || 0;
+    
+    // Skip low volume pairs
+    if (volume < 50000) continue;
+    
+    // Check each chain for DEX arbitrage
+    for (const [chain, dexes] of Object.entries(DEX_BY_CHAIN)) {
+      const chainPrices = {};
+      
+      // Collect prices from DEXes on this chain
+      for (const dex of dexes) {
+        if (prices[dex] && prices[dex] > 0) {
+          chainPrices[dex] = prices[dex];
+        }
+      }
+      
+      // Need at least 2 DEXes with prices
+      if (Object.keys(chainPrices).length < 2) continue;
+      
+      // Find best buy and sell prices
+      let bestBuyDex = null, bestBuyPrice = Infinity;
+      let bestSellDex = null, bestSellPrice = 0;
+      
+      for (const [dex, price] of Object.entries(chainPrices)) {
+        if (price < bestBuyPrice) {
+          bestBuyPrice = price;
+          bestBuyDex = dex;
+        }
+        if (price > bestSellPrice) {
+          bestSellPrice = price;
+          bestSellDex = dex;
+        }
+      }
+      
+      // Skip if same DEX
+      if (bestBuyDex === bestSellDex) continue;
+      
+      // Calculate spread
+      const grossSpreadPercent = ((bestSellPrice - bestBuyPrice) / bestBuyPrice) * 100;
+      
+      // Skip unrealistic spreads
+      if (grossSpreadPercent <= 0 || grossSpreadPercent > 15) continue;
+      
+      // Get flash loan providers for this chain
+      const providers = PROVIDERS_BY_CHAIN[chain] || [];
+      
+      for (const providerName of providers) {
+        const provider = FLASH_LOAN_PROVIDERS[providerName];
+        if (!provider) continue;
+        
+        // Calculate profit for each loan size
+        for (const loanSize of LOAN_SIZES) {
+          if (loanSize < provider.minLoan || loanSize > provider.maxLoan) continue;
+          
+          // Flash loan fee
+          const flashLoanFee = loanSize * provider.fee;
+          
+          // DEX fees (buy + sell)
+          const dexFeeBuy = loanSize * 0.0025; // ~0.25% DEX fee + slippage
+          const dexFeeSell = (loanSize - dexFeeBuy) * 0.0025;
+          
+          // Gas cost estimate (varies by chain)
+          const gasCost = chain === 'ethereum' ? 50 : chain === 'solana' ? 0.01 : 5; // USD
+          
+          // Total costs
+          const totalCosts = flashLoanFee + dexFeeBuy + dexFeeSell + gasCost;
+          
+          // Gross profit
+          const grossProfit = loanSize * (grossSpreadPercent / 100);
+          
+          // Net profit
+          const netProfit = grossProfit - totalCosts;
+          const netProfitPercent = (netProfit / loanSize) * 100;
+          
+          // Check if profitable after all costs
+          if (netProfitPercent >= MIN_PROFIT_PERCENT && netProfit > 0) {
+            opportunities.push({
+              type: 'flash-loan',
+              symbol,
+              baseAsset: symbol.replace('USDT', '').replace('USDC', ''),
+              chain,
+              buyDex: bestBuyDex,
+              buyPrice: bestBuyPrice,
+              sellDex: bestSellDex,
+              sellPrice: bestSellPrice,
+              grossSpreadPercent,
+              netProfitPercent,
+              flashLoanProvider: providerName,
+              flashLoanFee: provider.fee * 100,
+              loanSize,
+              netProfit,
+              totalCosts,
+              gasCost,
+              volume24h: volume,
+              providerUrl: provider.url,
+              buyUrl: getUrl(bestBuyDex, symbol, 'spot'),
+              sellUrl: getUrl(bestSellDex, symbol, 'spot'),
+              executionSteps: [
+                `1. Flash borrow $${(loanSize/1000).toFixed(0)}K ${symbol.replace('USDT','').replace('USDC','')} from ${providerName}`,
+                `2. Buy ${symbol.replace('USDT','').replace('USDC','')} on ${bestBuyDex} at $${formatPrice(bestBuyPrice)}`,
+                `3. Sell on ${bestSellDex} at $${formatPrice(bestSellPrice)}`,
+                `4. Repay flash loan + ${provider.fee * 100}% fee`,
+                `5. Keep profit: $${netProfit.toFixed(2)}`
+              ]
+            });
+          }
+        }
+      }
+    }
+  }
+  
+  // Also check cross-DEX arbitrage (DEX to different DEX)
+  // This is where flash loans shine - instant arbitrage without capital
+  
+  // Sort by net profit percent
+  opportunities.sort((a, b) => b.netProfitPercent - a.netProfitPercent);
+  
+  console.log(`Flash Loan Arbitrage: ${opportunities.length} found`);
+  
+  return opportunities.slice(0, 50); // Top 50
+}
+
 // ========== Scanning ==========
 
 async function scanAllExchanges() {
@@ -1673,6 +1915,10 @@ async function scanAllExchanges() {
   // Find price differences between DEX and CEX
   const dexCexOpps = findDexCexOpportunities(allSpot, allVolumes);
   
+  // === 8. Flash Loan Arbitrage ===
+  // Find opportunities using flash loans (no capital needed)
+  const flashLoanOpps = findFlashLoanOpportunities(allSpot, allVolumes);
+  
   // Update cache
   priceCache.spot = allSpot;
   priceCache.futures = allFutures;
@@ -1686,12 +1932,13 @@ async function scanAllExchanges() {
   priceCache.triangularOpps = triangularOpps;
   priceCache.crossExchangeOpps = crossExchangeOpps;
   priceCache.dexCexOpps = dexCexOpps;
+  priceCache.flashLoanOpps = flashLoanOpps;
   priceCache.exchangeStats = exchangeStats;
   priceCache.lastUpdate = new Date();
   
-  console.log(`Found: ${spotFuturesOpps.length} spot-futures, ${futuresFuturesOpps.length} futures-futures, ${fundingOpps.length} funding, ${fairPriceOpps.length} fair-price, ${triangularOpps.length} triangular, ${dexCexOpps.length} dex-cex`);
+  console.log(`Found: ${spotFuturesOpps.length} spot-futures, ${futuresFuturesOpps.length} futures-futures, ${fundingOpps.length} funding, ${fairPriceOpps.length} fair-price, ${triangularOpps.length} triangular, ${dexCexOpps.length} dex-cex, ${flashLoanOpps.length} flash-loan`);
   
-  return { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, dexCexOpps, exchangeStats };
+  return { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, crossExchangeOpps, dexCexOpps, flashLoanOpps, exchangeStats };
 }
 
 function getUrl(exchange, symbol, type) {
@@ -1770,6 +2017,7 @@ const getModeKb = (currentMode) => ({
     [{ text: `${currentMode === 'triangular' ? '✅ ' : ''}🔺 Triangular Arb`, callback_data: 'set_mode_triangular' }],
     [{ text: `${currentMode === 'cross-exchange' ? '✅ ' : ''}🌐 Cross-Exchange Triangle`, callback_data: 'set_mode_cross-exchange' }],
     [{ text: `${currentMode === 'dex-cex' ? '✅ ' : ''}🔀 DEX-CEX Arbitrage`, callback_data: 'set_mode_dex-cex' }],
+    [{ text: `${currentMode === 'flash-loan' ? '✅ ' : ''}⚡ Flash Loan Arb`, callback_data: 'set_mode_flash-loan' }],
     [{ text: '🔙 Назад', callback_data: 'filters' }]
   ]
 });
@@ -1818,7 +2066,8 @@ function getModeName(mode) {
     'fair-price': '⚖️ Price vs Fair',
     'triangular': '🔺 Triangular Arb',
     'cross-exchange': '🌐 Cross-Exchange',
-    'dex-cex': '🔀 DEX-CEX'
+    'dex-cex': '🔀 DEX-CEX',
+    'flash-loan': '⚡ Flash Loan'
   }[mode] || mode;
 }
 
@@ -1834,15 +2083,16 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v12.0 для арбитража криптовалют.\n\n` +
-      `📊 <b>7 режимов работы:</b>\n` +
+      `Я SpreadUP Bot v13.0 для арбитража криптовалют.\n\n` +
+      `📊 <b>8 режимов работы:</b>\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
       `• 💰 <b>Funding Rate</b> - фандинг арбитраж\n` +
       `• ⚖️ <b>Price vs Fair</b> - отклонение от справедливой цены\n` +
       `• 🔺 <b>Triangular Arb</b> - треугольный арбитраж\n` +
       `• 🌐 <b>Cross-Exchange</b> - межбиржевой треугольник\n` +
-      `• 🔀 <b>DEX-CEX</b> - арбитраж DEX ↔ CEX\n\n` +
+      `• 🔀 <b>DEX-CEX</b> - арбитраж DEX ↔ CEX\n` +
+      `• ⚡ <b>Flash Loan</b> - арбитраж без капитала!\n\n` +
       `💱 <b>16 бирж:</b> 11 CEX + 5 DEX (Jupiter, Uniswap, PancakeSwap, Raydium, Orca)\n\n` +
       `🔒 <b>Фильтры:</b> спред ≤${MAX_SPREAD_PERCENT}% | объём ≥$500K\n\n` +
       `✅ Вы подписаны на уведомления!`,
@@ -1858,7 +2108,7 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v12.0</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v13.0</b>\n\n` +
       `<b>Режимы:</b>\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
@@ -1866,7 +2116,13 @@ async function handleMessage(msg) {
       `⚖️ Price vs Fair: отклонение от справедливой цены\n` +
       `🔺 Triangular: арбитраж внутри биржи (3 пары)\n` +
       `🌐 Cross-Exchange: треугольник на лучших биржах\n` +
-      `🔀 DEX-CEX: арбитраж между DEX и CEX\n\n` +
+      `🔀 DEX-CEX: арбитраж между DEX и CEX\n` +
+      `⚡ Flash Loan: арбитраж БЕЗ КАПИТАЛА!\n\n` +
+      `<b>⚡ Flash Loan - как это работает:</b>\n` +
+      `• Берём кредит без залога (до $100M!)\n` +
+      `• Делаем арбитраж за 1 транзакцию\n` +
+      `• Возвращаем кредит + комиссию\n` +
+      `• Оставляем прибыль себе!\n\n` +
       `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n` +
       `📊 Мин. объём: $500K\n\n` +
       `<b>Команды:</b>\n/start, /scan, /top, /filters, /status`,
@@ -1880,7 +2136,7 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v12.0</b>\n`;
+  let text = `📊 <b>Статус v13.0</b>\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
@@ -1889,7 +2145,8 @@ async function handleStatus(chatId) {
   text += `⚖️ Price vs Fair: ${priceCache.fairPriceOpps.length}\n`;
   text += `🔺 Triangular: ${priceCache.triangularOpps.length}\n`;
   text += `🌐 Cross-Exchange: ${(priceCache.crossExchangeOpps || []).length}\n`;
-  text += `🔀 DEX-CEX: ${(priceCache.dexCexOpps || []).length}\n\n`;
+  text += `🔀 DEX-CEX: ${(priceCache.dexCexOpps || []).length}\n`;
+  text += `⚡ Flash Loan: ${(priceCache.flashLoanOpps || []).length}\n\n`;
   
   if (priceCache.exchangeStats && Object.keys(priceCache.exchangeStats).length > 0) {
     text += `📊 <b>Биржи:</b>\n`;
@@ -1903,7 +2160,7 @@ async function handleStatus(chatId) {
 
 async function handleScan(chatId) {
   await sendMessage(chatId, '🔄 <b>Сканирование...</b>');
-  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, crossExchangeOpps, dexCexOpps } = await scanAllExchanges();
+  const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, crossExchangeOpps, dexCexOpps, flashLoanOpps } = await scanAllExchanges();
   const f = getFilters(chatId);
   
   if (f.mode === 'spot-futures') await showSpotFuturesResults(chatId, spotFuturesOpps, f);
@@ -1912,6 +2169,7 @@ async function handleScan(chatId) {
   else if (f.mode === 'fair-price') await showFairPriceResults(chatId, fairPriceOpps, f);
   else if (f.mode === 'cross-exchange') await showCrossExchangeResults(chatId, crossExchangeOpps, f);
   else if (f.mode === 'dex-cex') await showDexCexResults(chatId, dexCexOpps, f);
+  else if (f.mode === 'flash-loan') await showFlashLoanResults(chatId, flashLoanOpps, f);
   else await showTriangularResults(chatId, triangularOpps, f);
 }
 
@@ -2129,6 +2387,39 @@ async function showDexCexResults(chatId, opportunities, f) {
   await sendMessage(chatId, text, mainKeyboard);
 }
 
+async function showFlashLoanResults(chatId, opportunities, f) {
+  if (!opportunities || opportunities.length === 0) {
+    await sendMessage(chatId, `⚡ <b>Flash Loan Arbitrage</b>\n\nНайдено: 0 возможностей\n\n💡 <b>Как это работает:</b>\n• Берём flash loan (без залога!)\n• Делаем арбитраж за 1 транзакцию\n• Возвращаем кредит + комиссию\n• Оставляем прибыль!\n\n🔗 <b>Провайдеры:</b>\n• Aave (0.09%) - ETH, ARB, OP, Base\n• dYdX (0%) - Ethereum\n• Marginfi (0.1%) - Solana\n• Venus (0.09%) - BSC`, mainKeyboard);
+    return;
+  }
+  
+  // Filter by enabled exchanges
+  const filtered = opportunities.filter(opp => {
+    if (!f.enabledExchanges.includes(opp.buyDex)) return false;
+    if (!f.enabledExchanges.includes(opp.sellDex)) return false;
+    return true;
+  });
+  
+  let text = `⚡ <b>Flash Loan Arbitrage</b>\nНайдено: ${opportunities.length} | Фильтр: ${filtered.length}\n💡 Без капитала - берём кредит на 1 транзакцию!\n\n`;
+  
+  for (let i = 0; i < Math.min(8, filtered.length); i++) {
+    const opp = filtered[i];
+    const emoji = opp.netProfitPercent >= 1 ? '🔥' : opp.netProfitPercent >= 0.5 ? '⚡' : '📊';
+    const loanStr = opp.loanSize >= 1000000 ? `$${(opp.loanSize/1000000).toFixed(0)}M` : `$${(opp.loanSize/1000).toFixed(0)}K`;
+    
+    text += `${i+1}. ${emoji} <b>${opp.baseAsset || opp.symbol}</b> на ${opp.chain.toUpperCase()}\n`;
+    text += `   📥 ${opp.buyDex}: $${formatPrice(opp.buyPrice)}\n`;
+    text += `   📤 ${opp.sellDex}: $${formatPrice(opp.sellPrice)}\n`;
+    text += `   💰 <b>Прибыль: $${opp.netProfit.toFixed(2)}</b> (${opp.netProfitPercent.toFixed(2)}%)\n`;
+    text += `   💳 Flash loan: ${loanStr} у ${opp.flashLoanProvider}\n`;
+    text += `   💸 Комиссия: ${opp.flashLoanFee}% | Газ: ~$${opp.gasCost.toFixed(2)}\n\n`;
+  }
+  
+  text += `\n💡 <b>Для исполнения нужен:</b>\n• Смарт-контракт\n• Вся операция в 1 блоке\n• Прибыль > комиссии + газ`;
+  
+  await sendMessage(chatId, text, mainKeyboard);
+}
+
 async function handleTop(chatId) {
   const f = getFilters(chatId);
   if (priceCache.lastUpdate === null) {
@@ -2141,6 +2432,7 @@ async function handleTop(chatId) {
   else if (f.mode === 'fair-price') await showFairPriceResults(chatId, priceCache.fairPriceOpps, f);
   else if (f.mode === 'cross-exchange') await showCrossExchangeResults(chatId, priceCache.crossExchangeOpps || [], f);
   else if (f.mode === 'dex-cex') await showDexCexResults(chatId, priceCache.dexCexOpps || [], f);
+  else if (f.mode === 'flash-loan') await showFlashLoanResults(chatId, priceCache.flashLoanOpps || [], f);
   else await showTriangularResults(chatId, priceCache.triangularOpps, f);
 }
 
@@ -2166,6 +2458,7 @@ async function handleCallback(cb) {
   else if (data === 'set_mode_triangular') { f.mode = 'triangular'; await sendMessage(chatId, '✅ Triangular Arbitrage', getFiltersKb(f)); }
   else if (data === 'set_mode_cross-exchange') { f.mode = 'cross-exchange'; await sendMessage(chatId, '✅ Cross-Exchange Triangle', getFiltersKb(f)); }
   else if (data === 'set_mode_dex-cex') { f.mode = 'dex-cex'; await sendMessage(chatId, '✅ DEX-CEX Arbitrage', getFiltersKb(f)); }
+  else if (data === 'set_mode_flash-loan') { f.mode = 'flash-loan'; await sendMessage(chatId, '✅ Flash Loan Arbitrage', getFiltersKb(f)); }
   else if (data === 'filter_min_spread') await sendMessage(chatId, '📉 <b>Мин. спред</b>', getSpreadKb());
   else if (data === 'filter_funding_profit') await sendMessage(chatId, '💰 <b>Мин. прибыль</b>', getFundingProfitKb());
   else if (data === 'filter_min_volume') await sendMessage(chatId, '📊 <b>Мин. объём (USDT)</b>', getVolumeKb());
