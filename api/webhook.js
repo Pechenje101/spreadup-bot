@@ -291,8 +291,12 @@ async function fetchBingXPrices() {
   try {
     const ts = Date.now();
     const [spotRes, futuresRes] = await Promise.all([
-      fetch(`https://open-api.bingx.com/openApi/spot/v1/ticker/24hr?timestamp=${ts}`),
-      fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/ticker?timestamp=${ts}`)
+      fetch(`https://open-api.bingx.com/openApi/spot/v1/ticker/24hr?timestamp=${ts}`, {
+        signal: AbortSignal.timeout(15000)
+      }),
+      fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/ticker?timestamp=${ts}`, {
+        signal: AbortSignal.timeout(15000)
+      })
     ]);
     
     const spotData = await spotRes.json();
@@ -333,27 +337,37 @@ async function fetchBingXPrices() {
       }
     }
     
-    // Fetch funding rates for major symbols (top 50 by volume)
-    const majorSymbols = futuresSymbols.slice(0, 50);
-    const fundingPromises = majorSymbols.map(async (sym) => {
-      try {
-        const res = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/fundingRate?symbol=${sym}`);
-        const data = await res.json();
-        if (data.code === 0 && data.data && data.data[0]) {
-          const symbol = sym.replace('-', '');
-          const rate = parseFloat(data.data[0].fundingRate);
-          if (!isNaN(rate)) {
-            return { symbol, rate };
-          }
-        }
-      } catch (e) {}
-      return null;
-    });
+    // Fetch funding rates for major symbols (top 100 by volume)
+    // Batch requests to avoid timeout
+    const majorSymbols = futuresSymbols.slice(0, 100);
     
-    const fundingResults = await Promise.all(fundingPromises);
-    for (const result of fundingResults) {
-      if (result) {
-        funding[result.symbol] = result.rate;
+    // Process in batches of 20 to avoid rate limits
+    for (let i = 0; i < majorSymbols.length; i += 20) {
+      const batch = majorSymbols.slice(i, i + 20);
+      const fundingPromises = batch.map(async (sym) => {
+        try {
+          const res = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/fundingRate?symbol=${sym}`, {
+            signal: AbortSignal.timeout(10000)
+          });
+          const data = await res.json();
+          if (data.code === 0 && data.data && data.data[0]) {
+            const symbol = sym.replace('-', '');
+            const rate = parseFloat(data.data[0].fundingRate);
+            if (!isNaN(rate)) {
+              return { symbol, rate };
+            }
+          }
+        } catch (e) {
+          // Silent fail for individual requests
+        }
+        return null;
+      });
+      
+      const fundingResults = await Promise.all(fundingPromises);
+      for (const result of fundingResults) {
+        if (result) {
+          funding[result.symbol] = result.rate;
+        }
       }
     }
     
