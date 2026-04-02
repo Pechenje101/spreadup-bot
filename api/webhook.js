@@ -337,37 +337,34 @@ async function fetchBingXPrices() {
       }
     }
     
-    // Fetch funding rates for major symbols (top 100 by volume)
-    // Batch requests to avoid timeout
-    const majorSymbols = futuresSymbols.slice(0, 100);
+    // Fetch funding rates for TOP 30 symbols only (to avoid timeout)
+    // Focus on most liquid pairs
+    const majorSymbols = futuresSymbols.slice(0, 30);
     
-    // Process in batches of 20 to avoid rate limits
-    for (let i = 0; i < majorSymbols.length; i += 20) {
-      const batch = majorSymbols.slice(i, i + 20);
-      const fundingPromises = batch.map(async (sym) => {
-        try {
-          const res = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/fundingRate?symbol=${sym}`, {
-            signal: AbortSignal.timeout(10000)
-          });
-          const data = await res.json();
-          if (data.code === 0 && data.data && data.data[0]) {
-            const symbol = sym.replace('-', '');
-            const rate = parseFloat(data.data[0].fundingRate);
-            if (!isNaN(rate)) {
-              return { symbol, rate };
-            }
+    // Make all requests in parallel with short timeout
+    const fundingPromises = majorSymbols.map(async (sym) => {
+      try {
+        const res = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/fundingRate?symbol=${sym}`, {
+          signal: AbortSignal.timeout(5000)
+        });
+        const data = await res.json();
+        if (data.code === 0 && data.data && data.data[0]) {
+          const symbol = sym.replace('-', '');
+          const rate = parseFloat(data.data[0].fundingRate);
+          if (!isNaN(rate)) {
+            return { symbol, rate };
           }
-        } catch (e) {
-          // Silent fail for individual requests
         }
-        return null;
-      });
-      
-      const fundingResults = await Promise.all(fundingPromises);
-      for (const result of fundingResults) {
-        if (result) {
-          funding[result.symbol] = result.rate;
-        }
+      } catch (e) {
+        // Silent fail for individual requests
+      }
+      return null;
+    });
+    
+    const fundingResults = await Promise.all(fundingPromises);
+    for (const result of fundingResults) {
+      if (result) {
+        funding[result.symbol] = result.rate;
       }
     }
     
