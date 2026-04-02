@@ -1,10 +1,10 @@
 /**
- * SpreadUP Bot v13.0 - Multi-Mode Arbitrage Scanner
+ * SpreadUP Bot v14.0 - Funding Rate Focus Edition
  * 
  * Modes:
- * 1. Spot-Futures - Spot to Futures arbitrage
- * 2. Futures-Futures - Cross-exchange futures arbitrage
- * 3. Funding Rate - Funding rate arbitrage
+ * 1. 💰 Funding Rate ⭐ - MAIN MODE - Funding rate arbitrage
+ * 2. Spot-Futures - Spot to Futures arbitrage
+ * 3. Futures-Futures - Cross-exchange futures arbitrage
  * 4. Price vs Fair Price - Deviation from weighted average price
  * 5. Triangular Arbitrage - Intra-exchange triangle arb (USDT -> BTC -> ETH -> USDT)
  * 6. Cross-Exchange Triangle - Each step on best-priced exchange
@@ -14,6 +14,10 @@
  * Exchanges: 16 total
  * - CEX: MEXC, Gate.io, BingX, Bybit, OKX, Bitget, HTX, Lbank, KuCoin, WOO X, Deribit
  * - DEX: Jupiter, Uniswap, PancakeSwap, Raydium, Orca
+ * 
+ * v14.0 Changes:
+ * - Funding Rate is now the default and main mode
+ * - Fixed BingX funding rate (now using dedicated API endpoint)
  * 
  * Filters:
  * - Max spread 20% to filter out junk/scam tokens
@@ -314,6 +318,8 @@ async function fetchBingXPrices() {
       }
     }
     
+    // Collect futures symbols
+    const futuresSymbols = [];
     if (futuresData.data && Array.isArray(futuresData.data)) {
       for (const item of futuresData.data) {
         if (item.symbol && item.symbol.endsWith('-USDT')) {
@@ -321,12 +327,37 @@ async function fetchBingXPrices() {
           const price = parseFloat(item.lastPrice);
           if (price > 0) {
             futures[symbol] = price;
-            funding[symbol] = parseFloat(item.fundingRate) || 0;
+            futuresSymbols.push(item.symbol);
           }
         }
       }
     }
     
+    // Fetch funding rates for major symbols (top 50 by volume)
+    const majorSymbols = futuresSymbols.slice(0, 50);
+    const fundingPromises = majorSymbols.map(async (sym) => {
+      try {
+        const res = await fetch(`https://open-api.bingx.com/openApi/swap/v2/quote/fundingRate?symbol=${sym}`);
+        const data = await res.json();
+        if (data.code === 0 && data.data && data.data[0]) {
+          const symbol = sym.replace('-', '');
+          const rate = parseFloat(data.data[0].fundingRate);
+          if (!isNaN(rate)) {
+            return { symbol, rate };
+          }
+        }
+      } catch (e) {}
+      return null;
+    });
+    
+    const fundingResults = await Promise.all(fundingPromises);
+    for (const result of fundingResults) {
+      if (result) {
+        funding[result.symbol] = result.rate;
+      }
+    }
+    
+    console.log(`BingX: ${Object.keys(spot).length} spot, ${Object.keys(futures).length} futures, ${Object.keys(funding).length} funding rates`);
     return { spot, futures, volumes, funding, allPairs, exchange: 'BingX' };
   } catch (e) {
     console.error('BingX error:', e.message);
@@ -410,16 +441,43 @@ async function fetchOKXPrices() {
       }
     }
     
+    // Collect futures symbols for funding rate fetch
+    const futuresSymbols = [];
     if (futuresData.data) {
       for (const item of futuresData.data) {
         if (item.instId.endsWith('-USDT-SWAP')) {
           const symbol = item.instId.replace('-USDT-SWAP', '') + 'USDT';
           futures[symbol] = parseFloat(item.last);
-          funding[symbol] = parseFloat(item.fundingRate) || 0;
+          futuresSymbols.push(item.instId);
         }
       }
     }
     
+    // Fetch funding rates for major symbols (OKX requires separate API call)
+    const majorSymbols = futuresSymbols.slice(0, 30); // Top 30 to avoid rate limits
+    const fundingPromises = majorSymbols.map(async (instId) => {
+      try {
+        const res = await fetch(`https://www.okx.com/api/v5/public/funding-rate?instId=${instId}`);
+        const data = await res.json();
+        if (data.code === '0' && data.data && data.data[0]) {
+          const symbol = instId.replace('-USDT-SWAP', '') + 'USDT';
+          const rate = parseFloat(data.data[0].fundingRate);
+          if (!isNaN(rate)) {
+            return { symbol, rate };
+          }
+        }
+      } catch (e) {}
+      return null;
+    });
+    
+    const fundingResults = await Promise.all(fundingPromises);
+    for (const result of fundingResults) {
+      if (result) {
+        funding[result.symbol] = result.rate;
+      }
+    }
+    
+    console.log(`OKX: ${Object.keys(spot).length} spot, ${Object.keys(futures).length} futures, ${Object.keys(funding).length} funding rates`);
     return { spot, futures, volumes, funding, allPairs, exchange: 'OKX' };
   } catch (e) {
     console.error('OKX error:', e.message);
@@ -1976,7 +2034,7 @@ function getUrl(exchange, symbol, type) {
 function getFilters(chatId) {
   if (!userFilters[chatId]) {
     userFilters[chatId] = {
-      mode: 'spot-futures',
+      mode: 'funding-rate', // Funding Rate - основной режим по умолчанию
       minSpread: 0.5,
       minFundingProfit: 0.1,
       minVolume: 500000,
@@ -2010,9 +2068,9 @@ const getFiltersKb = (f) => ({
 
 const getModeKb = (currentMode) => ({
   inline_keyboard: [
+    [{ text: `${currentMode === 'funding-rate' ? '✅ ' : ''}💰 Funding Rate ⭐`, callback_data: 'set_mode_funding-rate' }],
     [{ text: `${currentMode === 'spot-futures' ? '✅ ' : ''}📈 Spot-Futures`, callback_data: 'set_mode_spot-futures' }],
     [{ text: `${currentMode === 'futures-futures' ? '✅ ' : ''}🔄 Futures-Futures`, callback_data: 'set_mode_futures-futures' }],
-    [{ text: `${currentMode === 'funding-rate' ? '✅ ' : ''}💰 Funding Rate`, callback_data: 'set_mode_funding-rate' }],
     [{ text: `${currentMode === 'fair-price' ? '✅ ' : ''}⚖️ Price vs Fair`, callback_data: 'set_mode_fair-price' }],
     [{ text: `${currentMode === 'triangular' ? '✅ ' : ''}🔺 Triangular Arb`, callback_data: 'set_mode_triangular' }],
     [{ text: `${currentMode === 'cross-exchange' ? '✅ ' : ''}🌐 Cross-Exchange Triangle`, callback_data: 'set_mode_cross-exchange' }],
@@ -2060,9 +2118,9 @@ const getVolumeKb = () => ({
 
 function getModeName(mode) {
   return { 
+    'funding-rate': '💰 Funding Rate ⭐',
     'spot-futures': '📈 Spot-Futures', 
     'futures-futures': '🔄 Futures-Futures', 
-    'funding-rate': '💰 Funding Rate',
     'fair-price': '⚖️ Price vs Fair',
     'triangular': '🔺 Triangular Arb',
     'cross-exchange': '🌐 Cross-Exchange',
@@ -2083,17 +2141,19 @@ async function handleMessage(msg) {
     userSubscribed[chatId] = true;
     await sendMessage(chatId,
       `👋 <b>Привет, ${name}!</b>\n\n` +
-      `Я SpreadUP Bot v13.0 для арбитража криптовалют.\n\n` +
+      `Я SpreadUP Bot v14.0 для арбитража криптовалют.\n\n` +
+      `⭐ <b>Главный режим: Funding Rate</b>\n` +
+      `Зарабатывайте на разнице фандинга между биржами!\n\n` +
       `📊 <b>8 режимов работы:</b>\n` +
+      `• 💰 <b>Funding Rate ⭐</b> - фандинг арбитраж (ОСНОВНОЙ)\n` +
       `• 📈 <b>Spot-Futures</b> - спот к фьючерсу\n` +
       `• 🔄 <b>Futures-Futures</b> - между фьючерсами\n` +
-      `• 💰 <b>Funding Rate</b> - фандинг арбитраж\n` +
       `• ⚖️ <b>Price vs Fair</b> - отклонение от справедливой цены\n` +
       `• 🔺 <b>Triangular Arb</b> - треугольный арбитраж\n` +
       `• 🌐 <b>Cross-Exchange</b> - межбиржевой треугольник\n` +
       `• 🔀 <b>DEX-CEX</b> - арбитраж DEX ↔ CEX\n` +
       `• ⚡ <b>Flash Loan</b> - арбитраж без капитала!\n\n` +
-      `💱 <b>16 бирж:</b> 11 CEX + 5 DEX (Jupiter, Uniswap, PancakeSwap, Raydium, Orca)\n\n` +
+      `💱 <b>16 бирж:</b> 11 CEX + 5 DEX\n\n` +
       `🔒 <b>Фильтры:</b> спред ≤${MAX_SPREAD_PERCENT}% | объём ≥$500K\n\n` +
       `✅ Вы подписаны на уведомления!`,
       mainKeyboard
@@ -2108,21 +2168,20 @@ async function handleMessage(msg) {
     await handleTop(chatId);
   } else if (text === '/help') {
     await sendMessage(chatId,
-      `📖 <b>Справка по SpreadUP Bot v13.0</b>\n\n` +
+      `📖 <b>Справка по SpreadUP Bot v14.0</b>\n\n` +
       `<b>Режимы:</b>\n` +
+      `💰 Funding Rate ⭐: Long низкий / Short высокий фандинг\n` +
       `📈 Spot-Futures: спот дешевле → фьючерс дороже\n` +
       `🔄 Futures-Futures: фьючерс A → фьючерс B\n` +
-      `💰 Funding Rate: Long низкий / Short высокий\n` +
       `⚖️ Price vs Fair: отклонение от справедливой цены\n` +
       `🔺 Triangular: арбитраж внутри биржи (3 пары)\n` +
       `🌐 Cross-Exchange: треугольник на лучших биржах\n` +
       `🔀 DEX-CEX: арбитраж между DEX и CEX\n` +
       `⚡ Flash Loan: арбитраж БЕЗ КАПИТАЛА!\n\n` +
-      `<b>⚡ Flash Loan - как это работает:</b>\n` +
-      `• Берём кредит без залога (до $100M!)\n` +
-      `• Делаем арбитраж за 1 транзакцию\n` +
-      `• Возвращаем кредит + комиссию\n` +
-      `• Оставляем прибыль себе!\n\n` +
+      `<b>⭐ Funding Rate - основной режим:</b>\n` +
+      `• Показывает разницу фандинга между биржами\n` +
+      `• Прибыль = (разница фандинга) × 3 раза в день\n` +
+      `• Стратегия: Long на бирже с низким, Short на бирже с высоким\n\n` +
       `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n` +
       `📊 Мин. объём: $500K\n\n` +
       `<b>Команды:</b>\n/start, /scan, /top, /filters, /status`,
@@ -2136,12 +2195,13 @@ async function handleMessage(msg) {
 async function handleStatus(chatId) {
   const lastUpdate = priceCache.lastUpdate ? new Date(priceCache.lastUpdate).toLocaleString('ru-RU') : 'Нет данных';
   
-  let text = `📊 <b>Статус v13.0</b>\n`;
+  let text = `📊 <b>Статус v14.0</b>\n`;
+  text += `⭐ Основной режим: Funding Rate\n`;
   text += `🔒 Макс. спред: ${MAX_SPREAD_PERCENT}%\n`;
   text += `📊 Мин. объём: $500K\n\n`;
+  text += `💰 Funding Rate: ${priceCache.fundingOpps.length}\n`;
   text += `📈 Spot-Futures: ${priceCache.opportunities.length}\n`;
   text += `🔄 Futures-Futures: ${priceCache.futuresFuturesOpps.length}\n`;
-  text += `💰 Funding Rate: ${priceCache.fundingOpps.length}\n`;
   text += `⚖️ Price vs Fair: ${priceCache.fairPriceOpps.length}\n`;
   text += `🔺 Triangular: ${priceCache.triangularOpps.length}\n`;
   text += `🌐 Cross-Exchange: ${(priceCache.crossExchangeOpps || []).length}\n`;
@@ -2560,8 +2620,9 @@ export default async function handler(req, res) {
     
     return res.status(200).json({
       status: 'SpreadUP Bot Active',
-      version: '12.0.0',
-      modes: ['spot-futures', 'futures-futures', 'funding-rate', 'fair-price', 'triangular', 'cross-exchange', 'dex-cex'],
+      version: '14.0.0',
+      defaultMode: 'funding-rate',
+      modes: ['funding-rate', 'spot-futures', 'futures-futures', 'fair-price', 'triangular', 'cross-exchange', 'dex-cex', 'flash-loan'],
       exchanges: ALL_EXCHANGES,
       cexExchanges: CEX_EXCHANGES,
       dexExchanges: DEX_EXCHANGES,
@@ -2587,5 +2648,7 @@ export default async function handler(req, res) {
   }
 }
 
-// v12.1 - DEX-CEX Arbitrage Mode Added
+// v14.0 - Funding Rate Focus Edition
+// - Funding Rate is now the default and main mode
+// - Fixed BingX funding rate (dedicated API endpoint)
 // Support for 16 exchanges: 11 CEX + 5 DEX
