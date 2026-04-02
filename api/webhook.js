@@ -365,6 +365,10 @@ async function fetchBingXPrices() {
     for (const result of fundingResults) {
       if (result) {
         funding[result.symbol] = result.rate;
+        // Log first few funding rates for debugging
+        if (Object.keys(funding).length <= 5) {
+          console.log(`BingX ${result.symbol}: funding rate = ${result.rate} (${(result.rate * 100).toFixed(4)}%)`);
+        }
       }
     }
     
@@ -2611,6 +2615,16 @@ export default async function handler(req, res) {
       try {
         const { spotFuturesOpps, futuresFuturesOpps, fundingOpps, fairPriceOpps, triangularOpps, dexCexOpps } = await scanAllExchanges();
         await sendAlerts(spotFuturesOpps, futuresFuturesOpps, fundingOpps);
+        
+        // Debug: show sample funding rates from each exchange
+        const fundingDebug = {};
+        for (const symbol of ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']) {
+          const rates = priceCache.fundingRates[symbol];
+          if (rates) {
+            fundingDebug[symbol] = rates;
+          }
+        }
+        
         return res.status(200).json({ 
           status: 'scanned',
           spotFutures: spotFuturesOpps.length,
@@ -2622,6 +2636,7 @@ export default async function handler(req, res) {
           maxSpread: MAX_SPREAD_PERCENT,
           minVolume: 500000,
           exchangeStats: priceCache.exchangeStats,
+          fundingDebug, // Show actual funding rates for debugging
           timestamp: new Date().toISOString()
         });
       } catch (e) {
